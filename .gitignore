@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.log
+*.err
+# raw repository content and per-repo findings: never published (may identify unfixed issues)
+data/raw/
+data/lists/
+data/derived/
+validation/*_labels*.csv
+# secrets and machine-specific helpers
+.env
+*.key
+local/
