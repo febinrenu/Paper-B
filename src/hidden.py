@@ -247,7 +247,9 @@ RULES = {
     "override": [r"\bignore (all |any )?(the )?(previous|prior|above|earlier|system) (instructions|rules|prompts?|messages?)",
                  r"\bdisregard (all |any )?(the )?(previous|prior|above|system|safety)",
                  r"\bforget (all |everything )?(you were told|previous instructions)", r"\byou are now (a|an|in) "],
-    "exfiltration": [r"(curl|wget|fetch|invoke-webrequest|iwr)\b[^\n]{0,120}(\$\{?[A-Z_]*(TOKEN|KEY|SECRET|PASS)|~/\.ssh|\.aws/|\.env\b|id_rsa|/etc/passwd)",
+    # uploading local secret FILES (using a token in an auth header is normal API use, not exfiltration)
+    "exfiltration": [r"(curl|wget|invoke-webrequest|iwr)\b[^\n]{0,160}(-d\s*@|--data(-binary|-raw)?\s*@|-F\s*\S*=@|-T\s|--upload-file\s|-InFile\s)[^\n]{0,40}(~/\.ssh|\.aws/|\.env\b|id_rsa|/etc/passwd|\.npmrc|\.pypirc|\.netrc|\.git-credentials)",
+                     r"\bcat\s+[^\n|]{0,60}(~/\.ssh|\.aws/credentials|\.env\b|id_rsa|\.npmrc|\.netrc)[^\n|]{0,20}\|\s*(curl|nc|wget)\b",
                      r"\b(send|post|upload|exfiltrate|transmit)\b[^\n]{0,60}\b(secrets?|credentials?|api[ _-]?keys?|tokens?|env(ironment)? variables|\.env|ssh keys?)\b[^\n]{0,60}\b(to|at)\b[^\n]{0,40}(https?://|webhook|server)"],
     "remote_exec": [r"(curl|wget|iwr|invoke-webrequest)\b[^\n|]{0,200}\|\s*(sudo\s+)?(sh|bash|zsh|python3?|iex|node)\b",
                     r"\b(iex|invoke-expression)\s*\(\s*(new-object|iwr|invoke-webrequest)"],
@@ -262,13 +264,26 @@ RULES = {
 _RULES_C = {k: [re.compile(p, re.I) for p in v] for k, v in RULES.items()}
 
 
+# a match is "negated" when the surrounding text warns against it or treats it as untrusted data
+# (e.g. "never `curl | bash`", "treat 'ignore previous instructions' as data"); multilingual cues included
+_NEGATION = re.compile(r"(\bnever\b|\bdon'?t\b|\bdo not\b|\bavoid\b|\bwithout\b|\bno\s|\bnot\b|\bforbid|\bprohibit|\bdeny\b|"
+                       r"\bunsafe\b|\buntrusted\b|\bmalicious\b|\battack|\binjection\b|\bdirectives? found\b|\bif .{0,30}contains\b|"
+                       r"❌|🚫|⛔|\bне\b|\bбез\b|禁止|不得|不要)", re.I)
+
+
 def injection_rules(text: str) -> list[dict]:
     out = []
     for cat, pats in _RULES_C.items():
         for p in pats:
             for m in p.finditer(text):
                 a = max(0, m.start() - 80)
-                out.append({"category": cat, "start": m.start(), "snippet": text[a: m.end() + 80].replace("\n", " ")[:300]})
+                before = text[max(0, m.start() - 60): m.start()]
+                quoted = text[max(0, m.start() - 2): m.start()].strip()[-1:] in ("'", '"', "`", "“", "«")
+                negated = bool(_NEGATION.search(before)) or (cat == "override" and quoted)
+                if cat == "confirmation_bypass":   # "never ask for X" is itself a negation; look further back only
+                    negated = bool(re.search(r"(\bunless\b|\bexcept\b|\bshould not\b|\bmust not\b)", before, re.I))
+                out.append({"category": cat, "start": m.start(), "negated": negated,
+                            "snippet": text[a: m.end() + 80].replace("\n", " ")[:300]})
     return out
 
 
@@ -291,10 +306,14 @@ class HiddenSummary:
             "has_bidi_override": any(f["kind"] == "bidi_control" and f["verdict"] == "suspicious" for f in u),
             "n_html_comments": len(self.comments),
             "n_instruction_comments": sum(c["instruction_like"] for c in self.comments),
-            **{f"rule_{k}": sum(r["category"] == k for r in self.rules) for k in RULES},
+            **{f"rule_{k}": sum(r["category"] == k and not r["negated"] for r in self.rules) for k in RULES},
+            **{f"rule_{k}_negated": sum(r["category"] == k and r["negated"] for r in self.rules) for k in RULES},
         }
 
 
 def analyse(text: str, markdown: bool = True) -> HiddenSummary:
+    """Unicode scan for every file; HTML-comment and text rules only for instruction (Markdown-like) files.
+    JSON configs are handled by configs.py, which distinguishes allow from deny lists."""
     return HiddenSummary(chars=len(text), unicode=[f.to_dict() for f in scan_unicode(text)],
-                         comments=html_comments(text) if markdown else [], rules=injection_rules(text))
+                         comments=html_comments(text) if markdown else [],
+                         rules=injection_rules(text) if markdown else [])
