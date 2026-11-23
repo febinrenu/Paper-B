@@ -125,7 +125,9 @@ class GitHub:
                 return None
             if r.status_code in (409, 451):      # empty repo / legal block
                 return None
-            if rem is not None and int(rem) < 20:   # stay polite near the primary limit
+            limit = int(r.headers.get("x-ratelimit-limit", 5000))
+            # stay polite near the primary limit; the margin scales with the bucket (core 5000/h vs search 10-30/min)
+            if rem is not None and int(rem) <= max(0, limit // 250):
                 reset = int(r.headers.get("x-ratelimit-reset", time.time() + 60))
                 time.sleep(max(1, reset - int(time.time()) + 2))
             return r
