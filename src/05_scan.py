@@ -35,8 +35,11 @@ def kind_of(t: str) -> str:
 
 def records() -> pd.DataFrame:
     rows = []
+    p_s = {d["stratum"]: d["p"] for d in read_jsonl(LISTS / "frame1_days.jsonl") if d["kind"] == "design"}
+    stratum = {r["repo"]: r["stratum"] for r in read_jsonl(LISTS / "frame1_repos.jsonl")}
     for r in read_jsonl(LISTS / "frame1_files.jsonl"):
-        rows.append({"frame": 1, "type": r["type"], "repo": r["repo"], "path": r["path"], "sha": r.get("sha"), "fork": False})
+        rows.append({"frame": 1, "type": r["type"], "repo": r["repo"], "path": r["path"], "sha": r.get("sha"), "fork": False,
+                     "stratum": stratum.get(r["repo"]), "p_incl": p_s.get(stratum.get(r["repo"]))})
     for f in sorted((LISTS / "code_search").glob("*.jsonl")):
         if f.name.endswith("_shards.jsonl"):
             continue
@@ -103,8 +106,9 @@ def main() -> None:
     with Pool(a.workers) as pool, open(DERIVED / "details.jsonl", "w", encoding="utf-8") as det:
         for i, r in enumerate(pool.imap_unordered(scan, jobs, chunksize=200), 1):
             for s in r.pop("_servers", []):
-                servers.append({"sha": r["sha"], "kind": r["kind"], **{k: (json.dumps(v) if isinstance(v, list) else v)
-                                                                      for k, v in s.items()}})
+                # "kind" of a server is its launch kind (npx, uvx, docker, remote, ...); the blob's kind is kept apart
+                servers.append({"sha": r["sha"], "blob_kind": r["kind"], **{k: (json.dumps(v) if isinstance(v, list) else v)
+                                                                           for k, v in s.items()}})
             d = r.pop("_detail", None)
             if d:
                 det.write(json.dumps({"sha": r["sha"], "kind": r["kind"], **d}, ensure_ascii=False) + "\n")
