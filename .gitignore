@@ -13,3 +13,4 @@ validation/*_labels*.csv
 .env
 *.key
 local/
+data/*.finished

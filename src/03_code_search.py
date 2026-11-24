@@ -29,11 +29,18 @@ GRID = ([(a, a + 24) for a in range(0, 10_000, 25)] + [(a, a + 99) for a in rang
         + [(a, a + 999) for a in range(50_000, 384_000, 1000)])
 
 
-def search(gh: GitHub, q: str, page: int = 1, per_page: int = 100) -> dict | None:
-    r = gh.get("/search/code", {"q": q, "per_page": per_page, "page": page})
-    if r is None or r.status_code != 200:
-        return None
-    return r.json()
+def search(gh: GitHub, q: str, page: int = 1, per_page: int = 100, tries: int = 5) -> dict | None:
+    """One code-search call, retried with backoff (timeouts, 5xx and abuse responses are usually transient)."""
+    for attempt in range(tries):
+        r = gh.get("/search/code", {"q": q, "per_page": per_page, "page": page}, ok404=False)
+        if r is not None and r.status_code == 200:
+            return r.json()
+        status = None if r is None else r.status_code
+        print(time.strftime("%H:%M"), f"search failed ({status}) attempt {attempt + 1}: {q} p{page}", flush=True)
+        if status == 422:                       # malformed query: retrying will not help
+            return None
+        time.sleep(30 * (attempt + 1))
+    return None
 
 
 def total(gh: GitHub, q: str) -> tuple[int, bool] | None:
@@ -41,7 +48,7 @@ def total(gh: GitHub, q: str) -> tuple[int, bool] | None:
     return None if j is None else (j["total_count"], j.get("incomplete_results", False))
 
 
-def enumerate_range(gh, label, base_q, lo, hi, out, shards, done):
+def enumerate_range(gh, label, base_q, lo, hi, out, shards, done, seen):
     key = f"{lo}..{hi}"
     if key in done:
         return
@@ -54,31 +61,49 @@ def enumerate_range(gh, label, base_q, lo, hi, out, shards, done):
     if n > 1000 and hi > lo:
         mid = (lo + hi) // 2
         append_jsonl(shards, {"shard": key, "status": "split", "total": n})
-        enumerate_range(gh, label, base_q, lo, mid, out, shards, done)
-        enumerate_range(gh, label, base_q, mid + 1, hi, out, shards, done)
+        enumerate_range(gh, label, base_q, lo, mid, out, shards, done, seen)
+        enumerate_range(gh, label, base_q, mid + 1, hi, out, shards, done, seen)
         return
-    got = 0
+    got, failed = 0, False
     for page in range(1, min(10, (n + 99) // 100) + 1):
         j = search(gh, q, page=page)
         if j is None:
+            failed = True
             break
         for it in j.get("items", []):
             repo = it.get("repository") or {}
+            got += 1
+            k = (repo.get("full_name"), it.get("path"), it.get("sha"))
+            if k in seen:                       # already recorded by an earlier, partial attempt
+                continue
+            seen.add(k)
             append_jsonl(out, {"type": label, "shard": key, "repo": repo.get("full_name"), "repo_id": repo.get("id"),
                                "fork": repo.get("fork"), "path": it.get("path"), "sha": it.get("sha"),
                                "html_url": it.get("html_url")})
-            got += 1
         if len(j.get("items", [])) < 100:
             break
-    append_jsonl(shards, {"shard": key, "status": "done", "total": n, "fetched": got, "truncated": n > 1000,
-                          "incomplete": incomplete, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    # a shard with a failed page is logged as "partial" and redone on the next run
+    append_jsonl(shards, {"shard": key, "status": "partial" if failed else "done", "total": n, "fetched": got,
+                          "truncated": n > 1000, "incomplete": incomplete, "v": 2,
+                          "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+
+
+def complete(s: dict) -> bool:
+    """A shard counts as done only if no page failed. Shards logged before page failures were tracked are
+    re-checked: fewer hits than min(total, 1000) by more than one page means a page was lost."""
+    if s["status"] != "done":
+        return False
+    if s.get("v") == 2:                        # page failures tracked: done means every page arrived
+        return True
+    return s.get("fetched", 0) >= min(s.get("total", 0), 1000) - 99
 
 
 def run_type(gh: GitHub, label: str, target: int, seed: int) -> None:
     base_q = FILE_TYPES[label][0]
     out, shards = OUT / f"{label}.jsonl", OUT / f"{label}_shards.jsonl"
     log = read_jsonl(shards)
-    done = {s["shard"] for s in log if s["status"] == "done"}
+    done = {s["shard"] for s in log if complete(s)}
+    seen = {(r.get("repo"), r.get("path"), r.get("sha")) for r in read_jsonl(out)}
     meta = next((s for s in log if s["status"] == "design"), None)
     if meta is None:
         t = total(gh, base_q)
@@ -99,13 +124,25 @@ def run_type(gh: GitHub, label: str, target: int, seed: int) -> None:
         # census: start from coarse ranges and bisect only where needed
         coarse = [(0, 999), (1000, 2999), (3000, 5999), (6000, 9999), (10_000, 19_999), (20_000, 49_999), (50_000, 384_000)]
         for lo, hi in coarse:
-            enumerate_range(gh, label, base_q, lo, hi, out, shards, done)
+            enumerate_range(gh, label, base_q, lo, hi, out, shards, done, seen)
     else:
         for i, (lo, hi) in enumerate(chosen, 1):
-            enumerate_range(gh, label, base_q, lo, hi, out, shards, done)
+            enumerate_range(gh, label, base_q, lo, hi, out, shards, done, seen)
             if i % 25 == 0:
                 print(f"[{label}] bins {i}/{len(chosen)}", flush=True)
     print(f"[{label}] finished", flush=True)
+
+
+def type_complete(label: str) -> bool:
+    """True when every shard reached in the last run ended complete (latest record per shard)."""
+    log = read_jsonl(OUT / f"{label}_shards.jsonl")
+    if not any(s["status"] == "design" for s in log):
+        return False
+    last = {}
+    for s in log:
+        if s["status"] != "design":
+            last[s["shard"]] = s
+    return all(s["status"] == "split" or complete(s) for s in last.values())
 
 
 def main() -> None:
@@ -117,9 +154,16 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=1122)
     a = ap.parse_args()
     gh = GitHub(min_interval=6.5)          # code search: 10 requests / minute
-    for label in a.types.split(","):
-        run_type(gh, label.strip(), a.target, a.seed)
-    if a.types == ap.get_default("types"):
+    labels = [x.strip() for x in a.types.split(",")]
+    for _ in range(3):                         # repair passes: redo shards that errored or lost a page
+        for label in labels:
+            if not type_complete(label):
+                run_type(gh, label, a.target, a.seed)
+        if all(type_complete(x) for x in labels):
+            break
+    status = {x: type_complete(x) for x in labels}
+    print("complete:", status, flush=True)
+    if a.types == ap.get_default("types") and all(status.values()):
         (LISTS.parent / "code_search.finished").write_text(time.strftime("%Y-%m-%dT%H:%M:%S"))
 
 
