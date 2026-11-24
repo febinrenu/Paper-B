@@ -108,10 +108,10 @@ class GitHub:
                 time.sleep(min(10 * attempt, 120))
                 continue
             rem = r.headers.get("x-ratelimit-remaining")
-            if r.status_code in (403, 429) and ("rate limit" in r.text.lower() or rem == "0"):
+            if r.status_code == 429 or (r.status_code == 403 and ("rate limit" in r.text.lower() or rem == "0")):
                 ra = r.headers.get("retry-after")
                 reset = int(r.headers.get("x-ratelimit-reset", time.time() + 60))
-                wait = int(ra) if ra else max(5, reset - int(time.time()) + 3)
+                wait = int(ra) if ra else (max(5, reset - int(time.time()) + 3) if rem == "0" else 60)
                 print(time.strftime("%H:%M"), f"rate limited, sleeping {wait}s", flush=True)
                 time.sleep(min(wait, 3700))
                 continue

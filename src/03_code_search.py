@@ -153,7 +153,7 @@ def main() -> None:
     ap.add_argument("--target", type=int, default=100_000)
     ap.add_argument("--seed", type=int, default=1122)
     a = ap.parse_args()
-    gh = GitHub(min_interval=6.5)          # code search: 10 requests / minute
+    gh = GitHub(min_interval=8.0)          # code search: 10 requests / minute; 6.5 s drew secondary-limit 429s
     labels = [x.strip() for x in a.types.split(",")]
     for _ in range(3):                         # repair passes: redo shards that errored or lost a page
         for label in labels:
