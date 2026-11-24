@@ -80,3 +80,9 @@ def test_vscode_settings():
 
 def test_split_npm():
     assert split_npm("@a/b@1.0.0") == ("@a/b", "1.0.0") and split_npm("@a/b") == ("@a/b", None) and split_npm("x@latest") == ("x", "latest")
+
+
+def test_parse_mcp_odd_shapes():
+    assert parse_mcp({"mcp": ["a", "b"]}) == []
+    assert parse_mcp({"mcp": {"servers": {"x": {"command": "npx", "args": ["-y", "pkg"]}}}})[0]["package"] == "pkg"
+    assert parse_mcp([1, 2]) == []

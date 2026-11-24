@@ -187,7 +187,8 @@ def classify_server(name: str, s: dict) -> dict:
 def parse_mcp(obj) -> list[dict]:
     if not isinstance(obj, dict):
         return []
-    servers = obj.get("mcpServers") or obj.get("servers") or (obj.get("mcp") or {}).get("servers") or {}
+    mcp = obj.get("mcp")
+    servers = obj.get("mcpServers") or obj.get("servers") or (mcp.get("servers") if isinstance(mcp, dict) else None) or {}
     if not isinstance(servers, dict):
         return []
     return [classify_server(str(k), v) for k, v in servers.items() if isinstance(v, dict)]
