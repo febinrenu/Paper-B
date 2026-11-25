@@ -2,7 +2,7 @@
 
 Waits (checking every 10 min) until data/code_search.finished exists and 04_fetch has caught up: every Frame 1
 and Frame 2 blob sha has a final fetch status (ok / too_large / gone), or the remainder has not changed for 2 h.
-Then runs 05_scan.py --workers 4, 06_stats.py --boot 1000 and 07_link.py, each logged to data/derived/auto_<step>.log. A failed step is retried
+Then runs 05_scan.py --workers 4, 06_stats.py --boot 1000, 07_link.py, 08_inherit.py and 10_numbers.py, each logged to data/derived/auto_<step>.log. A failed step is retried
 3 times, 20 minutes apart; data/analysis.finished is written only if every step succeeded.
 Usage: python -u src/auto_final.py
 """
@@ -15,7 +15,8 @@ import time
 from common import DATA, DERIVED, LISTS, read_jsonl
 
 SRC = __import__("pathlib").Path(__file__).resolve().parent
-STEPS = [("05_scan.py", "--workers", "4"), ("06_stats.py", "--boot", "1000"), ("07_link.py",)]
+STEPS = [("05_scan.py", "--workers", "4"), ("06_stats.py", "--boot", "1000"), ("07_link.py",), ("08_inherit.py",),
+         ("10_numbers.py",)]
 
 
 def unfetched() -> int:
