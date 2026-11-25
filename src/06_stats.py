@@ -207,7 +207,24 @@ def mcp_and_autonomy(files: pd.DataFrame, f2: pd.DataFrame) -> None:
                          "share_package_unpinned": (~pk.pinned).mean() if len(pk) else np.nan,
                          **{f"share_unpinned_{e}": (~pk[pk.eco == e].pinned).mean() if (pk.eco == e).any() else np.nan
                             for e in ("npm", "pypi", "docker")},
-                         "entries_always_allow": int((g.always_allow > 0).sum())})
+                         "entries_always_allow": int((g.always_allow > 0).sum()),
+                         # file level, comparable with repository-level studies
+                         "files_with_package_launch": pk[["repo", "path"]].drop_duplicates().shape[0],
+                         "files_with_unpinned": pk[~pk.pinned][["repo", "path"]].drop_duplicates().shape[0]})
+        r = per_type[-1]
+        r["share_files_with_unpinned"] = r["files_with_unpinned"] / files_with_servers if files_with_servers else np.nan
+        r["share_pkgfiles_with_unpinned"] = (r["files_with_unpinned"] / r["files_with_package_launch"]
+                                             if r["files_with_package_launch"] else np.nan)
+    # Frame 1 (probability sample of repositories): share of repositories with an MCP configuration that launch at
+    # least one unpinned package, Horvitz-Thompson weighted (weight = 1 / p_s)
+    f1 = files[(files.frame == 1) & files.type.isin(["mcp_json", "cursor_mcp", "vscode_mcp"]) & files.fetched.fillna(False)]
+    s1 = f1[["repo", "sha", "weight"]].merge(srv[["sha", "eco", "pin"]].drop_duplicates(), on="sha", how="inner")
+    if len(s1):
+        s1["unpinned"] = s1.eco.notna() & ~s1.pin.isin(["exact", "digest"])
+        rep = s1.groupby("repo").agg(w=("weight", "first"), unpinned=("unpinned", "any"))
+        per_type.append({"type": "frame1_repos", "config_files": len(rep),
+                         "files_with_unpinned": int(rep.unpinned.sum()),
+                         "share_files_with_unpinned": float((rep.w * rep.unpinned).sum() / rep.w.sum())})
     pd.DataFrame(per_type).to_csv(TABLES / "b5_mcp_remote_secrets.csv", index=False)
     print(pd.DataFrame(per_type).round(3).to_string(index=False))
 

@@ -125,6 +125,11 @@ def mcp() -> None:
             put(k + "UnpinnedShare", pct(r.share_package_unpinned))
             put(k + "UnpinnedNpm", pct(r.share_unpinned_npm)); put(k + "UnpinnedPypi", pct(r.share_unpinned_pypi))
             put(k + "UnpinnedDocker", pct(r.share_unpinned_docker)); put(k + "AlwaysAllow", num(r.entries_always_allow))
+            if "files_with_unpinned" in r:
+                put(k + "FilesUnpinned", num(r.files_with_unpinned))
+                put(k + "FilesUnpinnedShare", pct(r.share_files_with_unpinned))
+                put(k + "PkgFiles", num(r.get("files_with_package_launch")))
+                put(k + "PkgFilesUnpinnedShare", pct(r.get("share_pkgfiles_with_unpinned")))
     b4 = read("b4_mcp_launch.csv")
     if b4 is not None:
         tot = b4.entries.sum()
