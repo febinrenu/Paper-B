@@ -67,6 +67,11 @@ def secret_types(key: str, value) -> list[str]:
 # ---------------------------------------------------------------- launch specs
 NPX_RUNNERS = {"npx", "npx.cmd", "bunx", "pnpx"}
 PY_RUNNERS = {"uvx", "pipx"}
+_VALUE_FLAGS_UV = {"--python", "-p", "--with", "-w", "--with-editable", "--with-requirements", "--index", "--index-url",
+                   "--extra-index-url", "--default-index", "--find-links", "-f", "--directory", "--project", "--env-file",
+                   "--python-preference", "--cache-dir", "--config-file", "--constraints", "-c", "--overrides",
+                   "--index-strategy", "--keyring-provider", "--refresh-package", "--reinstall-package", "--upgrade-package",
+                   "-P"}
 _VALUE_FLAGS_DOCKER = {"-e", "--env", "-v", "--volume", "--name", "--network", "-p", "--publish", "-w", "--workdir",
                        "--env-file", "--mount", "-u", "--user", "--entrypoint", "--platform", "-l", "--label", "--add-host"}
 
@@ -148,11 +153,17 @@ def classify_server(name: str, s: dict) -> dict:
         return out
     if base in PY_RUNNERS or (base == "uv" and args[:2] == ["tool", "run"]):
         a2 = args[2:] if base == "uv" else (args[1:] if base == "pipx" and args[:1] == ["run"] else args)
-        spec = None
+        spec, skip = None, False
         for i, a in enumerate(a2):
+            if skip:                        # value of the previous flag (e.g. --python 3.12), not the package
+                skip = False
+                continue
             if a == "--from" and i + 1 < len(a2):
                 spec = a2[i + 1]
                 break
+            if a in _VALUE_FLAGS_UV:
+                skip = True
+                continue
             if not a.startswith("-"):
                 spec = a
                 break

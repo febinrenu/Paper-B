@@ -86,3 +86,15 @@ def test_parse_mcp_odd_shapes():
     assert parse_mcp({"mcp": ["a", "b"]}) == []
     assert parse_mcp({"mcp": {"servers": {"x": {"command": "npx", "args": ["-y", "pkg"]}}}})[0]["package"] == "pkg"
     assert parse_mcp([1, 2]) == []
+
+
+def test_uvx_value_flags_are_not_packages():
+    from configs import parse_mcp
+    obj = {"mcpServers": {
+        "a": {"command": "uvx", "args": ["--python", "3.12", "mcp-server-time"]},
+        "b": {"command": "uvx", "args": ["--with", "numpy", "--from", "pkg-x==1.0", "pkg-x"]},
+        "c": {"command": "uv", "args": ["tool", "run", "-p", "3.11", "serena"]}}}
+    got = {s["server"]: (s["package"], s["pin"]) for s in parse_mcp(obj)}
+    assert got["a"] == ("mcp-server-time", "unpinned")
+    assert got["b"][0] == "pkg-x" and got["b"][1] == "exact"
+    assert got["c"][0] == "serena"
