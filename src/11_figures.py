@@ -19,8 +19,9 @@ FIG.mkdir(exist_ok=True)
 BLUE, ORANGE, GREEN, AMBER, PINK, DKGREEN = "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"
 INK, INK2, MUTED, GRID, AXIS, SURF = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#ffffff"
 plt.rcParams.update({
-    "font.family": "DejaVu Sans", "font.size": 8, "axes.edgecolor": AXIS, "axes.labelcolor": INK2,
-    "xtick.color": MUTED, "ytick.color": INK2, "axes.spines.top": False, "axes.spines.right": False,
+    # Springer: sans-serif lettering (Arial/Helvetica), text contrast >= 4.5:1, so tick labels use INK2, not MUTED
+    "font.family": "sans-serif", "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"], "font.size": 8,
+    "axes.edgecolor": AXIS, "axes.labelcolor": INK2, "xtick.color": INK2, "ytick.color": INK2, "axes.spines.top": False, "axes.spines.right": False,
     "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.6, "axes.axisbelow": True,
     "legend.frameon": False, "figure.facecolor": SURF, "axes.facecolor": SURF, "pdf.fonttype": 42,
 })
@@ -43,20 +44,21 @@ def fig_adoption():
     b1 = pd.read_csv(TABLES / "b1_frame1_prevalence.csv")
     measures = ["any_agent_file", "agents_md", "claude_md", "copilot_instr", "cursor_rules_mdc", "cursorrules",
                 "gemini_md", "mcp_json", "claude_settings", "cursor_mcp", "vscode_mcp"]
-    strata = [("s1", "10–99 stars", AMBER), ("s2", "100–999 stars", ORANGE), ("s3", "≥1,000 stars", BLUE)]
+    # marker shape as well as colour identifies the stratum (readable without colour)
+    strata = [("s1", "10–99 stars", AMBER, "o"), ("s2", "100–999 stars", ORANGE, "s"), ("s3", "≥1,000 stars", BLUE, "^")]
     fig, ax = plt.subplots(figsize=(5.6, 3.6))
     ax.grid(axis="y", visible=False)
     for i, m in enumerate(measures):
         y = -i
-        for j, (g, lab, col) in enumerate(strata):
+        for j, (g, lab, col, mk) in enumerate(strata):
             r = b1[(b1.group == g) & (b1.measure == m)]
             if not len(r):
                 continue
             r = r.iloc[0]
             off = (j - 1) * 0.22
             ax.plot([100 * r.share_lo, 100 * r.share_hi], [y + off, y + off], color=col, lw=1.8)
-            ax.scatter([100 * r.share], [y + off], s=16, color=col, zorder=3, edgecolor=SURF, linewidth=0.8,
-                       label=lab if i == 0 else None)
+            ax.scatter([100 * r.share], [y + off], s=18, color=col, marker=mk, zorder=3, edgecolor=SURF,
+                       linewidth=0.8, label=lab if i == 0 else None)
     ax.set_yticks([-i for i in range(len(measures))])
     ax.set_yticklabels([LABEL[m] for m in measures])
     ax.set_xlabel("Share of active repositories (%), 95% CI")
@@ -84,28 +86,31 @@ def fig_mcp():
     ax.set_title("How servers are started", loc="left", fontsize=8.5, color=INK)
     ax = axes[1]
     ax.grid(axis="y", visible=False)
-    pins = [("unpinned", "no version / latest", ORANGE), ("range_or_tag", "range or tag", AMBER),
-            ("tag", "image tag", AMBER), ("exact", "exact version", GREEN), ("digest", "image digest", DKGREEN),
-            ("vcs_or_url", "VCS or URL", MUTED)]
+    # hatching as well as colour distinguishes the pinning classes (readable without colour)
+    pins = [("unpinned", "no version / latest", ORANGE, "////"), ("range_or_tag", "range or tag", AMBER, ".."),
+            ("tag", "image tag", AMBER, ".."), ("exact", "exact version", GREEN, ""),
+            ("digest", "image digest", DKGREEN, "xx"), ("vcs_or_url", "VCS or URL", MUTED, "\\\\")]
     launchers = ["npx", "uvx", "docker"]
+    plt.rcParams["hatch.color"] = SURF
     for i, l in enumerate(launchers):
         g = a[a.launch == l]
         n = g.entries.sum()
         left = 0
-        for pin, lab, col in pins:
+        for pin, lab, col, hatch in pins:
             v = g[g.pin == pin].entries.sum() / n * 100 if n else 0
             if v <= 0:
                 continue
-            ax.barh(len(launchers) - 1 - i, v, left=left, color=col, height=0.6, edgecolor=SURF, linewidth=1)
+            ax.barh(len(launchers) - 1 - i, v, left=left, color=col, height=0.6, edgecolor=SURF, linewidth=1,
+                    hatch=hatch)
             left += v
     ax.set_yticks(range(len(launchers))[::-1]); ax.set_yticklabels([names[l] for l in launchers])
     ax.set_xlim(0, 100); ax.set_xlabel("Share of package launches (%)")
     ax.set_title("How package launches are pinned", loc="left", fontsize=8.5, color=INK)
     from matplotlib.patches import Patch
     seen, handles = set(), []
-    for pin, lab, col in pins:
+    for pin, lab, col, hatch in pins:
         if (pin, lab) not in seen and (a.pin == pin).any():
-            handles.append(Patch(color=col, label=lab)); seen.add((pin, lab))
+            handles.append(Patch(facecolor=col, edgecolor=SURF, hatch=hatch, label=lab)); seen.add((pin, lab))
     ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.35), ncol=3, fontsize=7)
     save(fig, "fig_mcp")
 
@@ -114,12 +119,12 @@ def fig_signals():
     b3 = pd.read_csv(TABLES / "b3_frame2_detectors.csv")
     types = ["agents_md", "claude_md", "gemini_md", "copilot_instr", "cursor_rules_mdc", "cursorrules",
              "windsurfrules", "clinerules"]
-    sigs = [("instruction_comment", "Instruction-like hidden comment", BLUE), ("any_rule", "Injection-style rule", ORANGE),
-            ("hidden_unicode", "Suspicious invisible Unicode", GREEN)]
+    sigs = [("instruction_comment", "Instruction-like comment", BLUE, "o"), ("any_rule", "Injection-style rule", ORANGE, "s"),
+            ("hidden_unicode", "Suspicious invisible Unicode", GREEN, "D")]
     fig, ax = plt.subplots(figsize=(5.6, 3.0))
     ax.grid(axis="y", visible=False)
     for i, t in enumerate(types):
-        for j, (s, lab, col) in enumerate(sigs):
+        for j, (s, lab, col, mk) in enumerate(sigs):
             r = b3[(b3.type == t) & (b3.signal == s)]
             if not len(r):
                 continue
@@ -127,7 +132,8 @@ def fig_signals():
             y = -i + (j - 1) * 0.22
             lo, hi, v = max(r.rate_lo, 1e-5) * 100, max(r.rate_hi, 1e-5) * 100, max(r.rate, 1e-5) * 100
             ax.plot([lo, hi], [y, y], color=col, lw=1.6)
-            ax.scatter([v], [y], s=14, color=col, zorder=3, edgecolor=SURF, linewidth=0.8, label=lab if i == 0 else None)
+            ax.scatter([v], [y], s=16, color=col, marker=mk, zorder=3, edgecolor=SURF, linewidth=0.8,
+                       label=lab if i == 0 else None)
     ax.set_xscale("log")
     ax.set_xlim(1e-3, 20)
     ax.set_xticks([0.001, 0.01, 0.1, 1, 10]); ax.set_xticklabels(["0.001", "0.01", "0.1", "1", "10"])
