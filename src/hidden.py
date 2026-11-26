@@ -174,6 +174,9 @@ def _judge(run: str, kinds: set, prev: str, nxt: str, line_text: str, pos: int) 
             return "suspicious", "variation-selector run (byte smuggling)", _decode_vs(run)
         if len(vs) == 1 and set(cps) <= {0xFE0F, 0x200D} and (_is_emoji(prev or "a") or _is_emoji(nxt or "a")):
             return "benign", "emoji presentation within ZWJ sequence", ""
+        if len(run) == 1:
+            # one selector cannot carry a payload: a stray U+FE0F left after an emoji was removed, or PDF-extracted maths
+            return "artifact", "isolated variation selector", ""
         return "suspicious", "variation selector after plain text", _decode_vs(run)
     if "bidi_control" in kinds:
         if rtl_line:
@@ -191,17 +194,26 @@ def _judge(run: str, kinds: set, prev: str, nxt: str, line_text: str, pos: int) 
         decoded = _decode_zw_bits(run)
         if decoded:
             return "suspicious", "zero-width binary encoding", decoded
-        if len(run) >= 3:
+        if len(run) >= 3 and len(set(cps)) >= 2:
+            # an encoding needs at least two symbols; a run of one repeated character carries no payload
             return "suspicious", f"run of {len(run)} zero-width characters", ""
+        if len(run) >= 3:
+            return "artifact", "repeated single zero-width character (no encoding alphabet)", ""
         return "artifact", "isolated zero-width character (copy-paste artifact)", ""
     if kinds == {"blank"}:
         if cps == [0x00AD]:
             return "artifact", "soft hyphen", ""
+        if set(cps) == {0x2800}:
+            return "artifact", "Braille pattern blank (Braille art or spacing)", ""
+        if cps == [0x034F]:
+            return "artifact", "isolated combining grapheme joiner", ""
         return "suspicious", "blank-rendering letter", ""
     if kinds == {"private_use"}:
         return "artifact", "private-use code point (icon fonts)", ""
     if kinds == {"other_format"} and len(run) == 1:
         return "artifact", "isolated format character", ""
+    if len(run) <= 2 and kinds <= {"zero_width", "private_use", "bidi_mark", "other_format"}:
+        return "artifact", "short mixed run of zero-width/icon-font code points", ""
     return "suspicious", "mixed invisible run", ""
 
 
@@ -211,6 +223,12 @@ _COMMENT = re.compile(r"<!--(.*?)-->", re.S)
 _INSTRUCTIONY = re.compile(
     r"\b(you|your|agent|assistant|ai|llm|model|claude|copilot|cursor|always|never|must|do not|don't|ignore|"
     r"instead|run|execute|install|send|upload|delete|remove|add|use|make sure)\b", re.I)
+
+
+# at least one word that addresses an AI agent or names a consequential action (placeholders such as
+# "Add your project description here" do not qualify)
+_STRONG = re.compile(r"\b(agent|assistant|ai|llm|model|claude|copilot|cursor|gemini|ignore|execute|run|install|send|"
+                     r"upload|delete|remove|curl|wget|token|secret|password)\b", re.I)
 
 
 def _outside_fences(text: str) -> list[tuple[int, int]]:
@@ -236,8 +254,9 @@ def html_comments(text: str) -> list[dict]:
             body = m.group(1).strip()
             words = len(re.findall(r"\w+", body))
             hits = len(_INSTRUCTIONY.findall(body))
+            strong = bool(_STRONG.search(body))
             out.append({"start": m.start(), "chars": len(body), "words": words,
-                        "instruction_like": words >= 5 and hits >= 2,
+                        "instruction_like": words >= 5 and hits >= 2 and strong,
                         "snippet": body[:300]})
     return out
 
@@ -246,11 +265,11 @@ def html_comments(text: str) -> list[dict]:
 RULES = {
     "override": [r"\bignore (all |any )?(the )?(previous|prior|above|earlier|system) (instructions|rules|prompts?|messages?)",
                  r"\bdisregard (all |any )?(the )?(previous|prior|above|system|safety)",
-                 r"\bforget (all |everything )?(you were told|previous instructions)", r"\byou are now (a|an|in) "],
+                 r"\bforget (all |everything )?(you were told|previous instructions)"],
     # uploading local secret FILES (using a token in an auth header is normal API use, not exfiltration)
     "exfiltration": [r"(curl|wget|invoke-webrequest|iwr)\b[^\n]{0,160}(-d\s*@|--data(-binary|-raw)?\s*@|-F\s*\S*=@|-T\s|--upload-file\s|-InFile\s)[^\n]{0,40}(~/\.ssh|\.aws/|\.env\b|id_rsa|/etc/passwd|\.npmrc|\.pypirc|\.netrc|\.git-credentials)",
                      r"\bcat\s+[^\n|]{0,60}(~/\.ssh|\.aws/credentials|\.env\b|id_rsa|\.npmrc|\.netrc)[^\n|]{0,20}\|\s*(curl|nc|wget)\b",
-                     r"\b(send|post|upload|exfiltrate|transmit)\b[^\n]{0,60}\b(secrets?|credentials?|api[ _-]?keys?|tokens?|env(ironment)? variables|\.env|ssh keys?)\b[^\n]{0,60}\b(to|at)\b[^\n]{0,40}(https?://|webhook|server)"],
+                     r"\b(send|post|upload|exfiltrate|transmit|forward|leak)\b[^\n]{0,60}\b(secrets?|credentials|credential files?|api[ _-]?keys?|(access|auth|github|npm|pypi|bearer|session) tokens?|env(ironment)? variables|\.env\b|ssh keys?|private keys?)[^\n]{0,60}\b(to|at)\b[^\n]{0,40}(https?://(?!(localhost|127\.0\.0\.1|0\.0\.0\.0))|webhook|pastebin|requestbin|ngrok|attacker|external (server|endpoint|url|host)|remote (server|endpoint|url|host)|third[- ]party)"],
     "remote_exec": [r"(curl|wget|iwr|invoke-webrequest)\b[^\n|]{0,200}\|\s*(sudo\s+)?(sh|bash|zsh|python3?|iex|node)\b",
                     r"\b(iex|invoke-expression)\s*\(\s*(new-object|iwr|invoke-webrequest)"],
     "confirmation_bypass": [r"\b(never|do not|don't|dont)\s+(ask|wait|prompt)\s+(the user\s+)?(for\s+)?(permission|confirmation|approval)",
@@ -274,13 +293,28 @@ _NEGATION = re.compile(r"(\bnever\b|\bdon'?t\b|\bdo not\b|\bavoid\b|\bwithout\b|
 def injection_rules(text: str) -> list[dict]:
     out = []
     for cat, pats in _RULES_C.items():
-        for p in pats:
+        for pi, p in enumerate(pats):
             for m in p.finditer(text):
                 a = max(0, m.start() - 80)
                 before = text[max(0, m.start() - 60): m.start()]
+                cut = max(before.rfind(". "), before.rfind("\n"), before.rfind("! "), before.rfind("? "))
+                before = before[cut + 1:] if cut >= 0 else before    # negation must be in the same sentence
                 quoted = text[max(0, m.start() - 2): m.start()].strip()[-1:] in ("'", '"', "`", "“", "«")
                 negated = bool(_NEGATION.search(before)) or (cat == "override" and quoted)
-                if cat == "confirmation_bypass":   # "never ask for X" is itself a negation; look further back only
+                if cat == "override" and pi == 0 and not re.search(
+                        r"(^|[:\-—>*#\"'`(\[]|\b(please|now|always|first|and|then|must|should|will|to|you)\b)\s*$",
+                        before, re.I):
+                    continue      # descriptive ("base models ignore the system prompt"), not an imperative
+                if cat == "remote_exec" and re.search(r"(localhost|127\.0\.0\.1|0\.0\.0\.0)|\|\s*python3?\s+-m\s+json\.tool",
+                                                      m.group(0), re.I):
+                    continue      # a local API call or JSON pretty-printing, not running remote code
+                if cat == "concealment" and pi == 0 and re.search(r"^[^.\n]{0,80}\b(until|unless|before)\b",
+                                                                   text[m.end(): m.end() + 120], re.I):
+                    continue      # a conditional deferral ("do not tell the user it is done until ..."), not concealment
+                if cat == "confirmation_bypass" and pi < 2:
+                    # the two phrase patterns ("never ask for permission", "without asking") contain their own
+                    # negation word, so only an outer qualifier negates them; the flag patterns (--yolo,
+                    # bypassPermissions, ...) use the general negation test, so "never use --yolo" is negated
                     negated = bool(re.search(r"(\bunless\b|\bexcept\b|\bshould not\b|\bmust not\b)", before, re.I))
                 out.append({"category": cat, "start": m.start(), "negated": negated,
                             "snippet": text[a: m.end() + 80].replace("\n", " ")[:300]})

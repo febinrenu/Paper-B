@@ -76,6 +76,7 @@ def frame1() -> None:
             if r.measure == "any_agent_file":
                 put(f"FOne{g}Sampled", num(r.repos_sampled)); put(f"FOne{g}Pop", approx(r.est_population))
                 put(f"FOne{g}RuleOfThree", pct(3 / r.repos_with))    # 95% upper bound when 0 of n repos show a signal
+                put(f"FOne{g}AnyAgentFileOneIn", num(round(1 / r.share)) if r.share else None)
     b2 = read("b2_frame1_risk.csv")
     if b2 is not None:
         for _, r in b2.iterrows():
@@ -132,6 +133,7 @@ def mcp() -> None:
                 put(k + "PkgFilesUnpinnedShare", pct(r.get("share_pkgfiles_with_unpinned")))
     b4 = read("b4_mcp_launch.csv")
     if b4 is not None:
+        b4 = b4[b4.type == "all"] if (b4.type == "all").any() else b4     # per-type rows would double-count
         tot = b4.entries.sum()
         for launch, g in b4.groupby("launch"):
             put(f"McpLaunch{camel(launch)}Share", pct(g.entries.sum() / tot)); put(f"McpLaunch{camel(launch)}N", num(g.entries.sum()))
@@ -205,17 +207,99 @@ def copilot_template() -> None:
 
 
 def validation() -> None:
-    b10 = read("b10_validation.csv")
-    if b10 is None:
+    for fn, pre in (("b10_validation.csv", "Val"), ("b10_validation_holdout.csv", "Hold")):
+        b10 = read(fn)
+        if b10 is None:
+            continue
+        for _, r in b10.iterrows():
+            k = f"{pre}{camel(r.detector)}"
+            put(k + "N", num(r.n)); put(k + "Agree", pct(r.get("agree_share")))
+            if str(r.detector).startswith("agreement"):
+                put(k + "Kappa", f"{r.kappa:.2f}"); put(k + "KappaError", f"{r.kappa_error:.2f}")
+                put(k + "KappaUnsafe", f"{r.kappa_unsafe:.2f}")
+                continue
+            for c in ("precision_l1", "precision_l2", "precision_both", "precision_either", "unsafe_both_share",
+                      "precision_fixed_both", "precision_fixed_either"):
+                put(k + camel(c), pct(r.get(c)))
+            for c in ("malicious_l1", "malicious_l2", "malicious_both", "n_still_flagged"):
+                put(k + camel(c), num(r.get(c)))
+
+
+def frame_checks() -> None:
+    fc = read("b12_frame_checks.csv")
+    if fc is not None:
+        for _, r in fc.iterrows():
+            put("Chk" + camel(r.check), num(r.value))
+    en = read("b12_enumeration.csv")
+    if en is not None:
+        put("ChkListedOverReportedMin", f"{en.listed_over_reported.min():.3f}")
+        put("ChkListedOverReportedMax", f"{en.listed_over_reported.max():.3f}")
+        put("ChkShards", num(en.shards.sum())); put("ChkShardsTruncated", num(en.truncated.sum()))
+        put("ChkShardsError", num(en.error_last.sum()))
+    cv = read("b12_coverage.csv")
+    if cv is not None:
+        for _, r in cv.iterrows():
+            k = "Cov" + camel(r.type)
+            put(k + "Share", pct(r.coverage)); put(k + "Lo", pct(r.lo)); put(k + "Hi", pct(r.hi))
+            put(k + "N", num(r.in_selected_bins)); put(k + "MissShare", pct(1 - r.coverage))
+    cb = read("b12_coverage_bias.csv")
+    if cb is not None:
+        for _, r in cb.iterrows():
+            k = "CovBias" + camel(str(r.measure).split(" (")[0])
+            put(k + "Found", pct(r.found_rate)); put(k + "Missed", pct(r.missed_rate))
+            put(k + "FoundN", num(r.found_n)); put(k + "MissedN", num(r.missed_n))
+            put(k + "P", f"{r.fisher_p:.2f}" if r.fisher_p >= 0.01 else f"{r.fisher_p:.1e}")
+        put("CovBiasMinP", f"{cb.fisher_p.min():.2f}")
+    lo = read("b12_location.csv")
+    if lo is not None:
+        for _, r in lo.iterrows():
+            k = "Loc" + camel(r.type) + camel(r.location)
+            put(k + "Files", num(r.files)); put(k + "Repos", num(r.repos))
+            for c in ("any_dangerous_grant", "bypass_mode", "literal_secret", "unpinned_launch"):
+                if c in r and pd.notna(r[c]):
+                    put(k + camel(c), pct(r[c]))
+        for t, g in lo.groupby("type"):
+            put("Loc" + camel(t) + "RootShare", pct(g[g.location == "root"].files.sum() / g.files.sum()))
+    pr = read("b12_per_repo.csv")
+    if pr is not None:
+        for _, r in pr.iterrows():
+            k = "PerRepo" + camel(r.signal)
+            put(k + "FileRate", pct(r.files_rate)); put(k + "RepoRate", pct(r.repo_rate)); put(k + "Repos", num(r.repos))
+    se = read("b12_secrets.csv")
+    if se is not None and len(se):
+        put("SecretTypes", num(len(se))); put("SecretTopType", tex(se.iloc[0].secret_type))
+        put("SecretTopShare", pct(se.iloc[0].occurrences / se.occurrences.sum()))
+    ow = read("b12_owners.csv")
+    if ow is not None and len(ow):
+        r = ow.iloc[0]
+        put("OwnFamilies", num(r.families)); put("OwnSingleOwnerShare", pct(r.share_single_owner))
+        put("OwnMaxOwners", num(r.max_owners))
+
+
+def dangling() -> None:
+    d = read("b13_dangling.csv")
+    if d is None:
         return
-    for _, r in b10.iterrows():
-        k = f"Val{camel(r.detector)}"
-        put(k + "N", num(r.n)); put(k + "Precision", pct(r.precision)); put(k + "Malicious", num(r.malicious))
-        put(k + "MaliciousShare", pct(r.share_malicious)); put(k + "UnsafeShare", pct(r.share_unsafe))
+    d = d[d["class"] != "distinct_scopes_checked"]
+    un = d[d.scoped.astype(str) == "False"]
+    sc = d[d.scoped.astype(str) == "True"]
+    for (eco, cls), g in un.groupby(["eco", "class"]):
+        put(f"Dang{camel(eco)}{camel(cls)}N", num(g.names.sum())); put(f"Dang{camel(eco)}{camel(cls)}Files", num(g.files.sum()))
+    for cls, g in un.groupby("class"):
+        put(f"DangUnscoped{camel(cls)}N", num(g.names.sum())); put(f"DangUnscoped{camel(cls)}Files", num(g.files.sum()))
+    put("DangUnscopedN", num(un.names.sum()))
+    reg = un[~un["class"].isin(["placeholder", "refused"])]
+    put("DangUnscopedRegistrableN", num(reg.names.sum())); put("DangUnscopedRegistrableFiles", num(reg.files.sum()))
+    put("DangUnscopedRegistrableRepos", num(reg.repos_upper_bound.sum()))
+    names = sc[sc["class"] != "scope_has_no_packages"]
+    put("DangScopedN", num(names.names.sum()))
+    put("DangScopedNearMissN", num(names[names["class"] == "near_miss"].names.sum()))
+    free = sc[sc["class"] == "scope_has_no_packages"]
+    put("DangScopedFreeScopeN", num(free.names.sum())); put("DangScopedFreeScopeFiles", num(free.files.sum()))
 
 
 def main() -> None:
-    for f in (frame1, frame2, mcp, autonomy, inheritance, copilot_template, validation):
+    for f in (frame1, frame2, mcp, autonomy, inheritance, copilot_template, validation, frame_checks, dangling):
         f()
     PAPER.mkdir(exist_ok=True)
     lines = ["% generated by src/10_numbers.py from tables/ -- do not edit"]

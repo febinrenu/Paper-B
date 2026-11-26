@@ -140,24 +140,36 @@ def fig_signals():
 def fig_autonomy():
     b6 = pd.read_csv(TABLES / "b6_autonomy.csv")
     d = b6[(b6.frame == 2) & (b6.type == "claude_settings")]
-    items = [("any_dangerous_grant", "Any dangerous pre-approval"), ("allow_bash_risky_cmd", "Risky shell command allowed"),
-             ("allow_mcp_tool", "MCP tool allowed"), ("allow_write_any", "Unrestricted file writes"),
-             ("allow_webfetch_any", "Unrestricted web fetch"), ("allow_bash_any", "Any shell command"),
+    d1 = b6[(b6.frame == 1) & (b6.type == "claude_settings")]
+    items = [("any_dangerous_grant", "Any dangerous pre-approval"),
+             ("allow_bash_runner_wildcard", "Interpreter/runner wildcard"),
+             ("allow_write_any", "Unrestricted file writes"), ("allow_bash_any", "Unrestricted shell"),
+             ("allow_bash_rm_wildcard", "Recursive rm wildcard"), ("allow_webfetch_any", "Unrestricted web fetch"),
+             ("bypass_permissions_mode", "Permission checks bypassed"),
              ("enable_all_project_mcp", "All project MCP servers enabled"),
-             ("default_mode_acceptEdits", "Edits accepted by default"), ("bypass_permissions_mode", "Permission checks bypassed"),
-             ("has_hooks", "Hooks defined"), ("has_deny_rules", "Deny rules present")]
-    fig, ax = plt.subplots(figsize=(5.2, 3.0))
+             ("allow_mcp_tool", "MCP tool pre-approved*"), ("has_hooks", "Hooks defined*"),
+             ("session_start_hook", "Session-start hook*"), ("has_deny_rules", "Deny rules present*")]
+    fig, ax = plt.subplots(figsize=(5.4, 3.4))
     ax.grid(axis="y", visible=False)
-    vals = []
+    vals, v1, lo1, hi1 = [], [], [], []
     for k, lab in items:
         r = d[d["item"] == k]
         vals.append(float(r.share.iloc[0]) * 100 if len(r) else np.nan)
-    cols = [ORANGE if k not in ("has_hooks", "has_deny_rules") else MUTED for k, _ in items]
-    ax.barh(range(len(items))[::-1], vals, color=cols, height=0.62)
+        r1 = d1[d1["item"] == k]
+        v1.append(float(r1.share.iloc[0]) * 100 if len(r1) else np.nan)
+        lo1.append(float(r1.share_lo.iloc[0]) * 100 if len(r1) and "share_lo" in r1 else np.nan)
+        hi1.append(float(r1.share_hi.iloc[0]) * 100 if len(r1) and "share_hi" in r1 else np.nan)
+    y = np.arange(len(items))[::-1]
+    cols = [ORANGE if not lab.endswith("*") else MUTED for _, lab in items]
+    ax.barh(y, vals, color=cols, height=0.62, label="Frame 2 (census of indexed files)")
+    v1, lo1, hi1 = map(np.array, (v1, lo1, hi1))
+    ax.errorbar(v1, y, xerr=[v1 - lo1, hi1 - v1], fmt="o", ms=3.2, color=INK, ecolor=INK2, elinewidth=0.9,
+                capsize=1.8, label="Frame 1 (repository sample, 95% CI)")
     for i, v in enumerate(vals):
-        ax.text(v + 0.6, len(items) - 1 - i, f"{v:.1f}%", va="center", fontsize=7, color=INK2)
-    ax.set_yticks(range(len(items))[::-1]); ax.set_yticklabels([lab for _, lab in items])
-    ax.set_xlabel("Share of committed Claude Code settings files (%)")
+        ax.text(max(v, np.nan_to_num(hi1[i])) + 0.8, y[i], f"{v:.1f}%", va="center", fontsize=7, color=INK2)
+    ax.set_yticks(y); ax.set_yticklabels([lab for _, lab in items])
+    ax.set_xlabel("Share of committed Claude Code settings files (%)\n* not counted as dangerous")
+    ax.legend(loc="lower right", fontsize=6.5, frameon=False)
     save(fig, "fig_autonomy")
 
 
@@ -165,7 +177,7 @@ def fig_copying():
     b9 = pd.read_csv(TABLES / "b9_inheritance.csv")
     d = b9[(b9.frame == 2) & (b9.type == "all_types")]
     subsets = [("all", "All substantive files"), ("any_signal", "Any content signal"), ("any_rule", "Injection-style rule"),
-               ("instruction_comment", "Hidden instruction comment"), ("dangerous_grant", "Dangerous pre-approval"),
+               ("instruction_comment", "Instruction-like comment"), ("dangerous_grant", "Dangerous pre-approval"),
                ("literal_secret", "Literal secret"), ("unpinned_mcp", "Unpinned MCP launch")]
     fig, ax = plt.subplots(figsize=(5.0, 2.5))
     ax.grid(axis="y", visible=False)

@@ -28,6 +28,7 @@ from importlib import import_module
 
 import numpy as np
 import pandas as pd
+from statsmodels.stats.proportion import proportion_confint
 
 from common import DERIVED, LISTS, TABLES, read_jsonl
 
@@ -103,6 +104,8 @@ def frame1(files: pd.DataFrame, B: int) -> None:
     R[types] = R[types].fillna(False).astype(bool)
     # .vscode/settings.json is mostly editor settings, not agent configuration: kept as its own row, not in "any"
     R["any_agent_file"] = R[[t for t in types if t != "vscode_settings"]].any(axis=1)
+    # AGENTS.md or CLAUDE.md anywhere in the tree: the definition of Zarzycki (2026), for a like-for-like comparison
+    R["agents_or_claude_md"] = R[[t for t in ("agents_md", "claude_md") if t in R]].any(axis=1)
     sigcols = [c for c in signals(f1.head(0)).columns]
     R[sigcols] = R[sigcols].fillna(False).astype(bool)
 
@@ -126,7 +129,7 @@ def frame1(files: pd.DataFrame, B: int) -> None:
                         "est_population": den.sum()})
         return out
 
-    prev_cols = ["any_agent_file"] + types
+    prev_cols = ["any_agent_file", "agents_or_claude_md"] + types
     rows_p, rows_r = [], []
     for label, sub_clus in [("all", clus)] + [(s, clus[clus.stratum == s]) for s in sorted(design)]:
         sub_cids = sub_clus.cid.tolist()
@@ -244,20 +247,31 @@ def mcp_and_autonomy(files: pd.DataFrame, f2: pd.DataFrame) -> None:
             dang = cs.cs_dangerous.fillna("[]").map(json.loads)
             sec = cs.cs_secrets.fillna("[]").map(json.loads)
             n = len(cs)
+            hooks_ev = cs.cs_hook_events.fillna("[]").map(lambda x: json.loads(x) if isinstance(x, str) else list(x))
+            strict = dang.map(lambda d: any(x != "mcp_tool" for x in d))
             items = {"bypass_permissions_mode": dang.map(lambda d: "bypass_permissions_mode" in d),
                      "default_mode_acceptEdits": cs.cs_default_mode.eq("acceptEdits"),
                      "allow_bash_any": dang.map(lambda d: "bash_any" in d),
-                     "allow_bash_risky_cmd": dang.map(lambda d: "bash_risky_cmd" in d),
+                     "allow_bash_runner_wildcard": dang.map(lambda d: "bash_runner_wildcard" in d),
+                     "allow_bash_rm_wildcard": dang.map(lambda d: "bash_rm_wildcard" in d),
                      "allow_webfetch_any": dang.map(lambda d: "webfetch_any" in d),
                      "allow_write_any": dang.map(lambda d: "write_any" in d),
                      "allow_mcp_tool": dang.map(lambda d: "mcp_tool" in d),
                      "enable_all_project_mcp": dang.map(lambda d: "enable_all_project_mcp" in d),
-                     "any_dangerous_grant": dang.map(bool),
+                     "any_dangerous_grant": strict,                       # excludes pre-approved MCP tools
+                     "any_dangerous_or_mcp_tool": dang.map(bool),
                      "has_hooks": cs.cs_hooks_n.fillna(0) > 0,
+                     "session_start_hook": hooks_ev.map(lambda e: "SessionStart" in e),
                      "has_deny_rules": cs.cs_deny_n.fillna(0) > 0,
                      "literal_secret_in_env": sec.map(bool)}
-            rows += [{"frame": fr, "type": "claude_settings", "item": k, "files": n, "files_with": int(v.sum()),
-                      "share": v.mean()} for k, v in items.items()]
+            w = cs.weight.fillna(1.0) if fr == 1 else pd.Series(1.0, index=cs.index)
+            n_eff = w.sum() ** 2 / (w ** 2).sum()                 # Kish effective sample size
+            for k, v in items.items():
+                v = v.astype(bool)
+                sh = float((w * v).sum() / w.sum())
+                lo, hi = proportion_confint(round(sh * n_eff), round(n_eff), method="wilson")
+                rows.append({"frame": fr, "type": "claude_settings", "item": k, "files": n, "files_with": int(v.sum()),
+                             "share": sh, "share_lo": lo, "share_hi": hi, "weighted": fr == 1, "n_eff": n_eff})
         vs = files[(files.frame == fr) & (files.type == "vscode_settings") & files.fetched.fillna(False)]
         if len(vs):
             items = {"chat_tools_auto_approve": vs.vs_auto_approve.fillna(False).astype(bool),

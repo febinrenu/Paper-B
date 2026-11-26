@@ -14,7 +14,8 @@ Categories (not exclusive):
     dangling_unscoped   ... and unscoped: anyone can register the name
     dangling_scoped     ... npm @scope/name: only the scope's owner can publish it (claimable only if the scope is free)
   mal_record        an OSV MAL record exists for the name
-    malicious_at_birth  first MAL record within 30 days of the package's creation (or creation unknown)
+    malicious_at_birth  first MAL record within 30 days of the package's creation
+    mal_timing_unknown  creation date missing or later than the first MAL record (the name was re-registered)
     compromised         first MAL record > 30 days after creation: malicious versions of an existing package
   removed         npm tombstone (unpublished), all PyPI files yanked, or npm security-holding package
   hallucinated    in Paper A's hallucinated set
@@ -108,7 +109,8 @@ def main() -> None:
 
     mal = pd.read_parquet(PAPER_A / "data" / "registry" / "osv_mal.parquet")
     mal["eco"] = mal.ecosystem.map({"PyPI": "pypi", "npm": "npm"})
-    mal = mal[mal.eco.notna()]
+    mal = mal[mal.eco.notna() & mal.withdrawn.isna()]          # withdrawn records are retracted false positives
+    mal["published"] = pd.to_datetime(mal.published, utc=True, format="ISO8601")
     mal["k"] = [key(e, n) for e, n in zip(mal.eco, mal.name)]
     malfirst = mal.groupby(["eco", "k"]).published.min().to_dict()
     malk = set(malfirst)
@@ -120,10 +122,13 @@ def main() -> None:
     k = [(e, key(e, n)) for e, n in zip(pk.eco, pk.name)]
     pk["mal_record"] = [x in malk for x in k]
     pk["mal_first_published"] = pd.to_datetime(pd.Series([malfirst.get(x) for x in k], index=pk.index), utc=True, errors="coerce")
-    created = pd.to_datetime(pk.created, utc=True, errors="coerce")
-    late = ((pk.mal_first_published - created).dt.days > COMPROMISE_DAYS).fillna(False)
-    pk["compromised"] = pk.mal_record & late
-    pk["malicious_at_birth"] = pk.mal_record & ~pk.compromised
+    created = pd.to_datetime(pk.created, utc=True, errors="coerce", format="ISO8601")
+    gap = (pk.mal_first_published - created).dt.days
+    # timing is unknown when the creation date is missing or postdates the first report (name re-registered)
+    known = created.notna() & (gap >= 0)
+    pk["compromised"] = pk.mal_record & known & (gap > COMPROMISE_DAYS)
+    pk["malicious_at_birth"] = pk.mal_record & known & (gap <= COMPROMISE_DAYS)
+    pk["mal_timing_unknown"] = pk.mal_record & ~known
     pk["hallucinated"] = [x in halk for x in k]
     pk["removed"] = pk.tombstone | pk.yanked_all | pk.security_holding
     pk["dangling"] = ~pk.exists & ~pk.tombstone
@@ -137,7 +142,7 @@ def main() -> None:
         base = {"eco": eco, "packages_total": len(g), "files_total": int(g.files.sum()),
                 "skipped_non_name_strings": int(len(skipped) if eco == "all" else (skipped.eco == eco).sum())}
         for cat in ("dangling", "dangling_unscoped", "dangling_scoped", "mal_record", "malicious_at_birth",
-                    "compromised", "removed", "hallucinated"):
+                    "compromised", "mal_timing_unknown", "removed", "hallucinated"):
             s = g[g[cat]]
             rows.append({**base, "category": cat, "packages": len(s), "share_packages": len(s) / len(g) if len(g) else np.nan,
                          "files": int(s.files.sum()), "repos_upper_bound": int(s.repos.sum()),

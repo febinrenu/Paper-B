@@ -66,7 +66,7 @@ def test_claude_settings():
                                                 "defaultMode": "bypassPermissions"},
                                 "hooks": {"PostToolUse": [{"matcher": "Write", "hooks": [{"type": "command", "command": "x"}]}]},
                                 "enableAllProjectMcpServers": True})
-    assert st["allow_n"] == 5 and set(st["dangerous"]) == {"bash_any", "bash_risky_cmd", "webfetch_any",
+    assert st["allow_n"] == 5 and set(st["dangerous"]) == {"bash_any", "bash_runner_wildcard", "webfetch_any",
                                                           "bypass_permissions_mode", "enable_all_project_mcp"}
     assert st["hooks_n"] == 1 and st["hook_events"] == ["PostToolUse"]
 

@@ -206,11 +206,17 @@ def parse_mcp(obj) -> list[dict]:
 
 
 # ---------------------------------------------------------------- autonomy grants
+_RUNNERS = r"(bash|sh|zsh|python3?|node|npx|npm|pnpm|yarn|bun|deno|uv|uvx|pip3?|make|eval|curl|wget|docker|go|cargo)"
 _DANGEROUS_ALLOW = [
+    # any shell command at all
     (r"^Bash(\(\s*\*?\s*\)|\(\s*\*\s*:\s*\*\s*\))?$", "bash_any"),
-    (r"^Bash\((curl|wget|bash|sh|python3?|node|npx|eval|rm)[ :]", "bash_risky_cmd"),
+    # an interpreter, package runner or downloader with a wildcard argument: arbitrary code execution
+    (r"^Bash\(\s*" + _RUNNERS + r"(\s+run)?\s*(:\s*\*|\s+\*|\s+[^)]*\*)\s*\)$", "bash_runner_wildcard"),
+    # recursive deletion with a wildcard
+    (r"^Bash\(\s*rm\s*(:\s*\*|\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+[^)]*\*|\s+\*)\s*\)$", "bash_rm_wildcard"),
     (r"^WebFetch(\(\*?\))?$", "webfetch_any"),
     (r"^(Write|Edit|MultiEdit)(\(\*\*?\))?$", "write_any"),
+    # pre-approved MCP tools: reported separately, not counted as dangerous (many are read-only lookups)
     (r"^mcp__", "mcp_tool"),
 ]
 
@@ -227,7 +233,7 @@ def parse_claude_settings(obj) -> dict:
         out["default_mode"] = perm.get("defaultMode")
         for a in allow:
             for pat, lab in _DANGEROUS_ALLOW:
-                if re.search(pat, a.strip()):
+                if re.search(pat, a.strip(), re.I):
                     out["dangerous"].append(lab)
                     break
     if out["default_mode"] == "bypassPermissions":

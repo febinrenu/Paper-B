@@ -28,9 +28,9 @@ MIN_CHARS = 200
 
 def subsets(f: pd.DataFrame, srv: pd.DataFrame) -> dict[str, pd.Series]:
     s = signals(f)
-    dangerous = f.cs_dangerous.fillna("[]").map(json.loads).map(bool)          # stored as JSON strings
+    dangerous = f.cs_dangerous.fillna("[]").map(json.loads).map(lambda d: any(x != "mcp_tool" for x in d))  # JSON strings; MCP-tool grants are not dangerous by themselves
     secret = (f.n_server_secrets.fillna(0) > 0) | f.cs_secrets.fillna("[]").map(json.loads).map(bool)
-    unpinned = f.sha.isin(srv[srv.pin == "unpinned"].sha)
+    unpinned = f.sha.isin(srv[srv.eco.notna() & ~srv.pin.isin(["exact", "digest"])].sha)
     return {"all": pd.Series(True, index=f.index), "any_signal": s.any_signal, "any_rule": s.any_rule,
             "instruction_comment": s.instruction_comment, "dangerous_grant": dangerous, "literal_secret": secret,
             "unpinned_mcp": unpinned}
