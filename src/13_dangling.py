@@ -93,6 +93,7 @@ def main() -> None:
     for s in scopes:
         scope_has_packages(s, cache, client)
     d["scope_free"] = [(not cache.get(n.split("/")[0][1:], True)) if n.startswith("@") else None for n in d.name]
+    d[["eco", "name", "class", "scope_free"]].to_parquet(DERIVED / "dangling_classes.parquet", index=False)  # private
 
     rows = []
     for (e, sc), g in d.groupby([d.eco, d.name.str.startswith("@")]):

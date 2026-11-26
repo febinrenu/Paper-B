@@ -58,7 +58,7 @@ def fig_adoption():
             off = (j - 1) * 0.22
             ax.plot([100 * r.share_lo, 100 * r.share_hi], [y + off, y + off], color=col, lw=1.8)
             ax.scatter([100 * r.share], [y + off], s=18, color=col, marker=mk, zorder=3, edgecolor=SURF,
-                       linewidth=0.8, label=lab if i == 0 else None)
+                       linewidth=0.8, label=f"{lab} (n = {int(r.repos_sampled):,})" if i == 0 else None)
     ax.set_yticks([-i for i in range(len(measures))])
     ax.set_yticklabels([LABEL[m] for m in measures])
     ax.set_xlabel("Share of active repositories (%), 95% CI")
@@ -147,18 +147,24 @@ def fig_autonomy():
     b6 = pd.read_csv(TABLES / "b6_autonomy.csv")
     d = b6[(b6.frame == 2) & (b6.type == "claude_settings")]
     d1 = b6[(b6.frame == 1) & (b6.type == "claude_settings")]
-    items = [("any_dangerous_grant", "Any dangerous pre-approval"),
-             ("allow_bash_runner_wildcard", "Interpreter/runner wildcard"),
-             ("allow_write_any", "Unrestricted file writes"), ("allow_bash_any", "Unrestricted shell"),
-             ("allow_bash_rm_wildcard", "Recursive rm wildcard"), ("allow_webfetch_any", "Unrestricted web fetch"),
-             ("bypass_permissions_mode", "Permission checks bypassed"),
-             ("enable_all_project_mcp", "All project MCP servers enabled"),
-             ("allow_mcp_tool", "MCP tool pre-approved*"), ("has_hooks", "Hooks defined*"),
-             ("session_start_hook", "Session-start hook*"), ("has_deny_rules", "Deny rules present*")]
-    fig, ax = plt.subplots(figsize=(5.4, 3.4))
+    # grouped by severity tier (bold tier rows, indented grants); grey rows are not counted as dangerous
+    items = [("any_dangerous_grant", "Any dangerous grant", "all"),
+             ("tier_critical", "Critical", "tier"),
+             ("bypass_permissions_mode", "   permission checks bypassed", "grant"),
+             ("allow_bash_any", "   unrestricted shell", "grant"),
+             ("tier_high", "High", "tier"),
+             ("allow_bash_runner_wildcard", "   interpreter/runner wildcard", "grant"),
+             ("allow_bash_rm_wildcard", "   recursive rm wildcard", "grant"),
+             ("tier_fs_net", "Filesystem/network", "tier"),
+             ("allow_write_any", "   unrestricted file writes", "grant"),
+             ("allow_webfetch_any", "   unrestricted web fetch", "grant"),
+             ("tier_trust", "Trust expansion: all project MCP servers", "tier"),
+             ("allow_mcp_tool", "MCP tool pre-approved", "other"), ("has_hooks", "Hooks defined", "other"),
+             ("session_start_hook", "   on session start", "other"), ("has_deny_rules", "Deny rules present", "other")]
+    fig, ax = plt.subplots(figsize=(5.6, 4.0))
     ax.grid(axis="y", visible=False)
     vals, v1, lo1, hi1 = [], [], [], []
-    for k, lab in items:
+    for k, _, _ in items:
         r = d[d["item"] == k]
         vals.append(float(r.share.iloc[0]) * 100 if len(r) else np.nan)
         r1 = d1[d1["item"] == k]
@@ -166,16 +172,29 @@ def fig_autonomy():
         lo1.append(float(r1.share_lo.iloc[0]) * 100 if len(r1) and "share_lo" in r1 else np.nan)
         hi1.append(float(r1.share_hi.iloc[0]) * 100 if len(r1) and "share_hi" in r1 else np.nan)
     y = np.arange(len(items))[::-1]
-    cols = [ORANGE if not lab.endswith("*") else MUTED for _, lab in items]
-    ax.barh(y, vals, color=cols, height=0.62, label="Frame 2 (census of indexed files)")
+    colour = {"all": ORANGE, "tier": ORANGE, "grant": "#f3a47f", "other": MUTED}
+    hatch = {"all": "", "tier": "", "grant": "////", "other": ".."}
+    plt.rcParams["hatch.color"] = SURF
+    for yi, v, (_, _, kind) in zip(y, vals, items):
+        ax.barh(yi, v, color=colour[kind], hatch=hatch[kind], height=0.62, edgecolor=SURF, linewidth=0.6)
     v1, lo1, hi1 = map(np.array, (v1, lo1, hi1))
-    ax.errorbar(v1, y, xerr=[v1 - lo1, hi1 - v1], fmt="o", ms=3.2, color=INK, ecolor=INK2, elinewidth=0.9,
-                capsize=1.8, label="Frame 1 (repository sample, 95% CI)")
+    ax.errorbar(v1, y, xerr=[v1 - lo1, hi1 - v1], fmt="o", ms=3.0, color=INK, ecolor=INK2, elinewidth=0.9,
+                capsize=1.6, label="Frame 1 repository sample (95% CI)")
     for i, v in enumerate(vals):
-        ax.text(max(v, np.nan_to_num(hi1[i])) + 0.8, y[i], f"{v:.1f}%", va="center", fontsize=7, color=INK2)
-    ax.set_yticks(y); ax.set_yticklabels([lab for _, lab in items])
-    ax.set_xlabel("Share of committed Claude Code settings files (%)\n* not counted as dangerous")
-    ax.legend(loc="lower right", fontsize=6.5, frameon=False)
+        if v == v:
+            ax.text(max(v, np.nan_to_num(hi1[i])) + 0.8, y[i], f"{v:.1f}%", va="center", fontsize=7, color=INK2)
+    ax.set_yticks(y); ax.set_yticklabels([lab for _, lab, _ in items])
+    for t, (_, _, kind) in zip(ax.get_yticklabels(), items):
+        if kind in ("all", "tier"):
+            t.set_fontweight("bold")
+    ax.axhline(y[10] - 0.5, color=AXIS, lw=0.8)                     # dangerous grants above, other settings below
+    from matplotlib.patches import Patch
+    hs = [Patch(facecolor=ORANGE, label="Frame 2: severity tier"),
+          Patch(facecolor="#f3a47f", hatch="////", edgecolor=SURF, label="Frame 2: grant"),
+          Patch(facecolor=MUTED, hatch="..", edgecolor=SURF, label="Frame 2: not counted as dangerous")]
+    h, _ = ax.get_legend_handles_labels()
+    ax.legend(handles=hs + h, loc="lower right", fontsize=6.3, frameon=False)
+    ax.set_xlabel("Share of committed Claude Code settings files (%)")
     save(fig, "fig_autonomy")
 
 
@@ -185,14 +204,29 @@ def fig_copying():
     subsets = [("all", "All substantive files"), ("any_signal", "Any content signal"), ("any_rule", "Injection-style rule"),
                ("instruction_comment", "Instruction-like comment"), ("dangerous_grant", "Dangerous pre-approval"),
                ("literal_secret", "Literal secret"), ("unpinned_mcp", "Unpinned MCP launch")]
-    fig, ax = plt.subplots(figsize=(5.0, 2.5))
+    fs = TABLES / "b14_family_sizes.csv"
+    fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.6), gridspec_kw={"width_ratios": [1.35, 1], "wspace": 0.55})
+    ax = axes[0]
     ax.grid(axis="y", visible=False)
     vals = [float(d[d.subset == k].share_shared.iloc[0]) * 100 if (d.subset == k).any() else np.nan for k, _ in subsets]
     ax.barh(range(len(subsets))[::-1], vals, color=[MUTED] + [BLUE] * (len(subsets) - 1), height=0.62)
     for i, v in enumerate(vals):
         ax.text(v + 0.4, len(subsets) - 1 - i, f"{v:.1f}%", va="center", fontsize=7, color=INK2)
     ax.set_yticks(range(len(subsets))[::-1]); ax.set_yticklabels([lab for _, lab in subsets])
-    ax.set_xlabel("Files that are byte-identical copies in another repository (%)")
+    ax.set_xlabel("Files with a byte-identical copy\nin another repository (%)")
+    ax.set_title("a  Shared files", loc="left", fontsize=8.5, color=INK)
+    ax = axes[1]
+    if fs.exists():
+        f = pd.read_csv(fs)
+        ax.grid(axis="x", visible=False)
+        ax.bar(range(len(f)), f.families, color=BLUE, width=0.62)
+        ax.set_yscale("log")
+        for i, v in enumerate(f.families):
+            ax.text(i, v * 1.15, f"{v:,}", ha="center", fontsize=6.5, color=INK2)
+        ax.set_xticks(range(len(f))); ax.set_xticklabels(f.family_repos, fontsize=7)
+        ax.set_xlabel("Repositories per copy family"); ax.set_ylabel("Copy families (log scale)")
+        ax.set_ylim(top=f.families.max() * 4)
+    ax.set_title("b  Family sizes", loc="left", fontsize=8.5, color=INK)
     save(fig, "fig_copying")
 
 

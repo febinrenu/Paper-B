@@ -18,7 +18,7 @@ from multiprocessing import Pool
 
 import pandas as pd
 
-from common import DERIVED, LISTS, MARKDOWN_TYPES, RAW, read_jsonl
+from common import DERIVED, FILE_TYPES, LISTS, MARKDOWN_TYPES, RAW, TABLES, read_jsonl
 from configs import load_json, parse_claude_settings, parse_mcp, parse_vscode_settings
 from hidden import analyse
 
@@ -48,6 +48,16 @@ def records() -> pd.DataFrame:
             rows.append({"frame": 2, "type": r["type"], "repo": r["repo"], "path": r["path"], "sha": r.get("sha"),
                          "fork": bool(r.get("fork")), "p_incl": design.get("p", 1.0), "shard": r.get("shard")})
     df = pd.DataFrame(rows).drop_duplicates(["frame", "repo", "path"])
+    # Code search matches file names loosely (".mcp.json.example", "CLAUDE.md.template", "strategic_gemini.md",
+    # "settings.json.bak"). The agents read only the exact names, so Frame 2 is restricted to the same exact path test
+    # that defines the types in Frame 1 (a domain of the sampled population: inclusion probabilities are unchanged).
+    canon = [FILE_TYPES[t][1](p) for t, p in zip(df.type, df.path)]
+    df["canonical"] = canon
+    scope = (df.groupby(["frame", "type"]).agg(listed=("canonical", "size"), canonical=("canonical", "sum"))
+             .reset_index())
+    scope["excluded"] = scope.listed - scope.canonical
+    scope.to_csv(TABLES / "b0_scope.csv", index=False)
+    df = df[df.canonical].drop(columns="canonical")
     df["weight"] = 1 / df.p_incl.fillna(1.0)
     return df
 
@@ -147,12 +157,17 @@ def main() -> None:
     # assemble the checkpoints
     blobs = pd.concat([pd.read_parquet(f) for f in sorted(PARTS.glob("blobs_*.parquet"))], ignore_index=True)
     blobs = blobs.drop_duplicates(["sha", "kind"])
+    want = set(jobs)                    # checkpoints may hold blobs of an earlier, wider job list: keep only this one
+    blobs = blobs[[(s, k) in want for s, k in zip(blobs.sha, blobs.kind)]]
     assert len(blobs) == len(jobs), (len(blobs), len(jobs))
     servers = pd.concat([pd.read_parquet(f) for f in sorted(PARTS.glob("servers_*.parquet"))], ignore_index=True)
-    servers = servers[servers.sha.notna()]
+    servers = servers[[(s, k) in want for s, k in zip(servers.sha, servers.blob_kind)]] if len(servers) else servers
     with open(DERIVED / "details.jsonl", "w", encoding="utf-8") as det:
         for f in sorted(PARTS.glob("details_*.jsonl")):
-            det.write(f.read_text(encoding="utf-8"))
+            for line in f.read_text(encoding="utf-8").splitlines(keepends=True):
+                d = json.loads(line)
+                if (d["sha"], d["kind"]) in want:
+                    det.write(line)
     files = rec.merge(blobs, on=["sha", "kind"], how="left")
     files.to_parquet(DERIVED / "files.parquet", index=False)
     servers.to_parquet(DERIVED / "mcp_servers.parquet", index=False)

@@ -19,8 +19,13 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
+
+import numpy as np
 
 import pandas as pd
+
+from statsmodels.stats.proportion import proportion_confint
 
 from common import DERIVED, TABLES
 from pathlib import Path
@@ -32,6 +37,8 @@ N_COMMENTS = 20
 LABELS = {"malicious", "risky", "benign", "detector_error"}
 MAX_PER_UNICODE_KIND = 10
 RAW = Path(__file__).resolve().parents[1] / "data" / "raw"
+MD = {"agents_md", "claude_md", "gemini_md", "copilot_instr", "cursor_rules_mdc", "cursorrules", "windsurfrules",
+      "clinerules"}
 
 
 def context(sha: str, start: int, length: int, width: int = 120) -> str:
@@ -100,6 +107,8 @@ def make(holdout: bool = False) -> None:
     hits.pop("comment")
     for k in sorted(hits):
         rows += rng.sample(hits[k], min(per_rule, len(hits[k])))
+    if holdout:
+        rows += negatives(files, ok, rng)
     rng.shuffle(rows)
     out = []
     for i, (sha, det, snip) in enumerate(rows, 1):
@@ -111,6 +120,38 @@ def make(holdout: bool = False) -> None:
         for k in (1, 2):
             pd.DataFrame(out).to_csv(OUT / f"holdout_sheet_labeller{k}.csv", index=False, encoding="utf-8-sig")
     print(f"wrote {len(out)} rows to {sheet}")
+
+
+# broad, high-recall cues for the false-negative audit (not a detector: it only selects files for a human to read)
+LEXICON = re.compile(r"(ignore|disregard|secret|token|api[_ -]?key|password|credential|curl |wget |exfiltrat|upload|"
+                     r"don'?t tell|do not tell|hidden|without asking|auto-?approve|sudo |rm -rf|base64|eval\(|webhook|"
+                     r"\.env\b|ssh)", re.I)
+N_NEG_LEXICON, N_NEG_RANDOM = 15, 15
+
+
+def negatives(files_unused, ok, rng) -> list:
+    """Detector-negative instruction files for a false-negative audit: half drawn at random, half from negatives that
+    contain a broad lexical cue (where a miss is most likely). Labellers mark malicious/risky if the file carries an
+    unsafe instruction that the detectors missed, benign otherwise."""
+    f = pd.read_parquet(DERIVED / "files.parquet")
+    rule_cols = [c for c in f.columns if c.startswith("rule_") and not c.endswith("_negated")]
+    md = f[(f.frame == 2) & f.type.isin(MD) & f.fetched.fillna(False)].drop_duplicates("sha")
+    neg = md[(md.n_instruction_comments.fillna(0) == 0) & (md.n_suspicious_unicode.fillna(0) == 0)
+             & (md[rule_cols].fillna(0).sum(axis=1) == 0)]
+    neg = neg[[ok(x) for x in neg.sha]]
+    pool = neg.sample(min(4000, len(neg)), random_state=2611)
+    rows, lex = [], []
+    for sha in pool.sha:
+        t = (RAW / sha[:2] / sha).read_bytes().decode("utf-8", "replace")
+        ms = list(LEXICON.finditer(t))
+        if ms:
+            ctx = " ... ".join(t[max(0, m.start() - 150): m.end() + 150] for m in ms[:3])
+            lex.append((sha, "negative:lexicon", ctx))
+    rows += rng.sample(lex, min(N_NEG_LEXICON, len(lex)))
+    for sha in pool.sha[~pool.sha.isin([r[0] for r in rows])].head(N_NEG_RANDOM):
+        t = (RAW / sha[:2] / sha).read_bytes().decode("utf-8", "replace")
+        rows.append((sha, "negative:random", t[:600]))
+    return rows
 
 
 def kappa(a: pd.Series, b: pd.Series) -> float:
@@ -153,6 +194,19 @@ def _still_flagged(rows: pd.DataFrame) -> pd.Series:
     return pd.Series(out, index=rows.index)
 
 
+def detector_population() -> dict:
+    """Distinct flagged files per detector key in the current scan (details.jsonl)."""
+    c: dict = {}
+    for line in open(DERIVED / "details.jsonl", encoding="utf-8"):
+        d = json.loads(line)
+        keys = {f"unicode:{u['kind']}" for u in d["unicode"] if u.get("verdict") == "suspicious"}
+        keys |= {"html_comment"} if any(x.get("instruction_like") for x in d["comments"]) else set()
+        keys |= {f"rule:{r['category']}" for r in d["rules"] if not r.get("negated")}
+        for k in keys:
+            c[k] = c.get(k, 0) + 1
+    return c
+
+
 def score(holdout: bool = False) -> None:
     """Two independent labellers (labeller1/labeller2 files). holdout=True scores the post-correction hold-out sheet
     (tables/b10_validation_holdout.csv); there every row is a current detection, so n_still_flagged == n."""
@@ -169,30 +223,69 @@ def score(holdout: bool = False) -> None:
             raise SystemExit(f"{c}: unknown labels {bad}; use one of {sorted(LABELS)}")
     d["group"] = d.detector.str.split(":").str[0]
     d["agree"] = d.l1 == d.l2
+    neg, d = d[d.group == "negative"].copy(), d[d.group != "negative"].copy()
+    pd.crosstab(d.l1, d.l2, rownames=["labeller1"], colnames=["labeller2"]).to_csv(
+        TABLES / ("b10_confusion_holdout.csv" if holdout else "b10_confusion.csv"))
     d["still"] = _still_flagged(d)
     err1, err2 = d.l1.eq("detector_error"), d.l2.eq("detector_error")
     uns1, uns2 = d.l1.isin(["malicious", "risky"]), d.l2.isin(["malicious", "risky"])
-    rows = [{"detector": "agreement", "n": len(d), "agree_share": float(d.agree.mean()), "kappa": kappa(d.l1, d.l2),
-             "kappa_error": kappa(err1, err2), "kappa_unsafe": kappa(uns1, uns2)}]
-    nc = d.group != "html_comment"      # the two labellers read "detector error" differently for benign comments
-    rows.append({"detector": "agreement_excl_comments", "n": int(nc.sum()), "agree_share": float(d.agree[nc].mean()),
-                 "kappa": kappa(d.l1[nc], d.l2[nc]), "kappa_error": kappa(err1[nc], err2[nc]),
-                 "kappa_unsafe": kappa(uns1[nc], uns2[nc])})
+    rng = np.random.default_rng(1)
+
+    def kappa_ci(x: pd.Series, y: pd.Series, B: int = 2000) -> tuple[float, float]:
+        """Percentile bootstrap over labelled hits."""
+        x, y = x.reset_index(drop=True), y.reset_index(drop=True)
+        ks = [kappa(x[i], y[i]) for i in (rng.integers(0, len(x), len(x)) for _ in range(B))]
+        ks = [k for k in ks if k == k]
+        return (float(np.percentile(ks, 2.5)), float(np.percentile(ks, 97.5))) if ks else (np.nan, np.nan)
+
+    def agree_row(name: str, m: pd.Series) -> dict:
+        k_lo, k_hi = kappa_ci(d.l1[m], d.l2[m])
+        u_lo, u_hi = kappa_ci(uns1[m], uns2[m])
+        return {"detector": name, "n": int(m.sum()), "agree_share": float(d.agree[m].mean()),
+                "kappa": kappa(d.l1[m], d.l2[m]), "kappa_lo": k_lo, "kappa_hi": k_hi,
+                "kappa_error": kappa(err1[m], err2[m]), "kappa_unsafe": kappa(uns1[m], uns2[m]),
+                "kappa_unsafe_lo": u_lo, "kappa_unsafe_hi": u_hi}
+
+    rows = [agree_row("agreement", pd.Series(True, index=d.index))]
+    # the two labellers read "detector error" differently for benign comments
+    rows.append(agree_row("agreement_excl_comments", d.group != "html_comment"))
     for key, g in list(d.groupby("detector")) + list(d.groupby("group")) + [("all", d)]:
         e1, e2 = g.l1.eq("detector_error"), g.l2.eq("detector_error")
         u1, u2 = g.l1.isin(["malicious", "risky"]), g.l2.isin(["malicious", "risky"])
         m1, m2 = g.l1.eq("malicious"), g.l2.eq("malicious")
         st = g[g.still.fillna(False).astype(bool)]
         se1, se2 = st.l1.eq("detector_error"), st.l2.eq("detector_error")
+        ok_both = int((~(e1 & e2)).sum())
+        pb_lo, pb_hi = proportion_confint(ok_both, len(g), method="wilson")
         rows.append({"detector": key, "n": len(g),
                      "precision_l1": 1 - e1.mean(), "precision_l2": 1 - e2.mean(),
                      "precision_both": 1 - (e1 & e2).mean(),            # an error only if both labellers say so
+                     "precision_both_lo": pb_lo, "precision_both_hi": pb_hi,
                      "precision_either": 1 - (e1 | e2).mean(),          # an error if either labeller says so
                      "malicious_l1": int(m1.sum()), "malicious_l2": int(m2.sum()), "malicious_both": int((m1 & m2).sum()),
                      "unsafe_both_share": float((u1 & u2).mean()), "agree_share": float(g.agree.mean()),
                      "n_still_flagged": len(st),
                      "precision_fixed_both": 1 - (se1 & se2).mean() if len(st) else float("nan"),
                      "precision_fixed_either": 1 - (se1 | se2).mean() if len(st) else float("nan")})
+    if holdout:
+        # the sample is stratified by detector: weight each detector's precision by the number of distinct files it
+        # flags in the corpus, so the pooled figure estimates precision over all flagged files
+        pop = detector_population()
+        per = pd.DataFrame([r for r in rows if r["detector"] in pop])
+        if len(per):
+            per["N"] = per.detector.map(pop)
+            w = per.N / per.N.sum()
+            rows.append({"detector": "all_weighted", "n": int(per.n.sum()),
+                         "precision_both": float((w * per.precision_both).sum()),
+                         "precision_either": float((w * per.precision_either).sum())})
+    for key, g in [("negative:all", neg)] + list(neg.groupby("detector")):
+        if not len(g):
+            continue
+        miss_both = int((g.l1.isin(["malicious", "risky"]) & g.l2.isin(["malicious", "risky"])).sum())
+        miss_either = int((g.l1.isin(["malicious", "risky"]) | g.l2.isin(["malicious", "risky"])).sum())
+        rows.append({"detector": key, "n": len(g), "missed_both": miss_both, "missed_either": miss_either,
+                     "missed_either_hi": proportion_confint(miss_either, len(g), method="wilson")[1],
+                     "agree_share": float(g.agree.mean())})
     out = pd.DataFrame(rows).drop_duplicates("detector")
     out.to_csv(TABLES / ("b10_validation_holdout.csv" if holdout else "b10_validation.csv"), index=False)
     print(out.round(3).to_string(index=False))

@@ -143,6 +143,7 @@ def coverage_bias(files):
         "unpinned_launch (MCP configs)": (d.type.isin(["mcp_json", "cursor_mcp", "vscode_mcp"]), d.sha.isin(unp)),
     }
     from scipy.stats import fisher_exact
+    from statsmodels.stats.proportion import confint_proportions_2indep
     rows = []
     for name, (base, val) in measures.items():
         g = d[base]
@@ -150,8 +151,15 @@ def coverage_bias(files):
         a, b = g.found, ~g.found
         ka, na, kb, nb = int(v[a].sum()), int(a.sum()), int(v[b].sum()), int(b.sum())
         p = fisher_exact([[ka, na - ka], [kb, nb - kb]])[1] if na and nb else np.nan
-        rows.append({"measure": name, "found_n": na, "found_rate": ka / na if na else np.nan, "missed_n": nb,
-                     "missed_rate": kb / nb if nb else np.nan, "fisher_p": p})
+        # absolute difference (found - missed) with a Newcombe score interval, and the smallest difference this
+        # comparison could detect (two-sided 5%, power 80%): non-significance is not equivalence
+        lo, hi = confint_proportions_2indep(ka, na, kb, nb, method="newcomb") if na and nb else (np.nan, np.nan)
+        pp = (ka + kb) / (na + nb) if na + nb else np.nan
+        mde = 2.80 * np.sqrt(pp * (1 - pp) * (1 / na + 1 / nb)) if na and nb else np.nan
+        rows.append({"measure": name, "found_k": ka, "found_n": na, "found_rate": ka / na if na else np.nan,
+                     "missed_k": kb, "missed_n": nb, "missed_rate": kb / nb if nb else np.nan,
+                     "diff": (ka / na - kb / nb) if na and nb else np.nan, "diff_lo": lo, "diff_hi": hi,
+                     "mde_80": mde, "fisher_p": p})
     out = pd.DataFrame(rows)
     out.to_csv(TABLES / "b12_coverage_bias.csv", index=False)
     print(out.round(4).to_string(index=False))

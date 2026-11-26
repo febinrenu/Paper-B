@@ -258,6 +258,17 @@ def mcp_and_autonomy(files: pd.DataFrame, f2: pd.DataFrame) -> None:
                      "allow_write_any": dang.map(lambda d: "write_any" in d),
                      "allow_mcp_tool": dang.map(lambda d: "mcp_tool" in d),
                      "enable_all_project_mcp": dang.map(lambda d: "enable_all_project_mcp" in d),
+                     # severity tiers (a file can be in several): what each grant lets an injected instruction do
+                     # critical: no confirmation for anything, or arbitrary shell
+                     "tier_critical": dang.map(lambda d: bool({"bypass_permissions_mode", "bash_any"} & set(d))),
+                     # high: arbitrary code through an interpreter/package runner/downloader, or recursive deletion
+                     "tier_high": dang.map(lambda d: bool({"bash_runner_wildcard", "bash_rm_wildcard"} & set(d))),
+                     # filesystem/network: unrestricted writes or web fetch (persistence, exfiltration channels)
+                     "tier_fs_net": dang.map(lambda d: bool({"write_any", "webfetch_any"} & set(d))),
+                     # trust expansion: every project MCP server starts without a prompt
+                     "tier_trust": dang.map(lambda d: "enable_all_project_mcp" in d),
+                     "tier_critical_or_high": dang.map(lambda d: bool({"bypass_permissions_mode", "bash_any",
+                                                                       "bash_runner_wildcard", "bash_rm_wildcard"} & set(d))),
                      "any_dangerous_grant": strict,                       # excludes pre-approved MCP tools
                      "any_dangerous_or_mcp_tool": dang.map(bool),
                      "has_hooks": cs.cs_hooks_n.fillna(0) > 0,
