@@ -125,7 +125,7 @@ def coverage_bias(files):
     f1["found"] = [(t, r.lower(), p) in cs for t, r, p in zip(f1.type, f1.repo, f1.path)]
     sc = files[files.frame == 1][["repo", "path", "type", "n_instruction_comments", "n_suspicious_unicode",
                                   "cs_dangerous", "sha", "fetched"]]
-    d = f1.merge(sc, on=["repo", "path", "type"], how="left")
+    d = f1.drop(columns=[c for c in ("sha",) if c in f1]).merge(sc, on=["repo", "path", "type"], how="left")
     d = d[d.fetched.fillna(False)]
     rules = files[files.frame == 1][[c for c in files.columns if c.startswith("rule_") and not c.endswith("_negated")]]
     rr = files[files.frame == 1][["repo", "path", "type"]].assign(any_rule=rules.fillna(0).sum(axis=1) > 0)

@@ -24,6 +24,7 @@ plt.rcParams.update({
     "axes.edgecolor": AXIS, "axes.labelcolor": INK2, "xtick.color": INK2, "ytick.color": INK2, "axes.spines.top": False, "axes.spines.right": False,
     "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.6, "axes.axisbelow": True,
     "legend.frameon": False, "figure.facecolor": SURF, "axes.facecolor": SURF, "pdf.fonttype": 42,
+    "ps.fonttype": 42,                                   # embed TrueType fonts in EPS (Springer artwork rules)
 })
 LABEL = {"any_agent_file": "Any agent configuration", "agents_md": "AGENTS.md", "claude_md": "CLAUDE.md",
          "gemini_md": "GEMINI.md", "copilot_instr": "Copilot instructions", "cursor_rules_mdc": "Cursor rules (.mdc)",
@@ -35,6 +36,7 @@ LABEL = {"any_agent_file": "Any agent configuration", "agents_md": "AGENTS.md", 
 def save(fig, name):
     fig.savefig(FIG / f"{name}.pdf", bbox_inches="tight")
     fig.savefig(FIG / f"{name}.png", dpi=200, bbox_inches="tight")
+    fig.savefig(FIG / f"{name}.eps", bbox_inches="tight")          # Springer's preferred vector format
     fig.savefig(PAPER / f"{name}.pdf", bbox_inches="tight")
     plt.close(fig)
     print("ok", name)
@@ -193,7 +195,7 @@ def fig_autonomy():
           Patch(facecolor="#f3a47f", hatch="////", edgecolor=SURF, label="Frame 2: grant"),
           Patch(facecolor=MUTED, hatch="..", edgecolor=SURF, label="Frame 2: not counted as dangerous")]
     h, _ = ax.get_legend_handles_labels()
-    ax.legend(handles=hs + h, loc="lower right", fontsize=6.3, frameon=False)
+    ax.legend(handles=hs + h, loc="upper center", bbox_to_anchor=(0.35, -0.13), ncol=2, fontsize=6.5, frameon=False)
     ax.set_xlabel("Share of committed Claude Code settings files (%)")
     save(fig, "fig_autonomy")
 

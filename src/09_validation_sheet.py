@@ -215,8 +215,12 @@ def score(holdout: bool = False) -> None:
     a = pd.read_csv(l1)
     b = pd.read_csv(l2) if l2.exists() else None
     d = a[["id", "detector", "file_type", "snippet", "link"]].copy()
-    d["l1"] = a.your_label.astype(str).str.strip().str.lower()
-    d["l2"] = b.your_label.astype(str).str.strip().str.lower() if b is not None else d.l1
+    d["l1"] = a.your_label.fillna("").astype(str).str.strip().str.lower()
+    d["l2"] = b.your_label.fillna("").astype(str).str.strip().str.lower() if b is not None else d.l1
+    empty = (d.l1 == "") | (d.l2 == "")                 # "leave a row empty if you can't decide": skipped
+    if empty.any():
+        print(f"skipping {int(empty.sum())} rows without a label from both labellers")
+    d = d[~empty].copy()
     for c in ("l1", "l2"):
         bad = set(d[c]) - LABELS
         if bad:

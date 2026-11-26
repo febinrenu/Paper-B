@@ -129,7 +129,10 @@ def hooks(files: pd.DataFrame) -> None:
         out.append({"class": c, "files_with_hooks": len(hf), "share_any_event": float(any_ev.mean()),
                     "share_session_start": float(ss.mean())})
         m(f"Hook{camel(c)}Share", float(any_ev.mean()), "pct"); m(f"Hook{camel(c)}SessionShare", float(ss.mean()), "pct")
-    ev = pd.DataFrame(rows).groupby(["event", "class"]).size().rename("commands").reset_index()
+    ev = pd.DataFrame(rows)
+    tot = ev.event.value_counts()
+    ev["event"] = ev.event.where(ev.event.map(tot) >= 5, "(event names used by fewer than 5 commands)")  # free text
+    ev = ev.groupby(["event", "class"]).size().rename("commands").reset_index()
     ev.to_csv(TABLES / "b14_hook_events.csv", index=False)
     pd.DataFrame(out).to_csv(TABLES / "b14_hooks.csv", index=False)
     m("HookFiles", len(hf), "num"); m("HookCommands", len(rows), "num")
@@ -205,7 +208,7 @@ def concentration(files: pd.DataFrame, srv: pd.DataFrame) -> None:
     fam = f.groupby("sha").agg(repos=("repo", "nunique"), owners=("owner", "nunique"))
     fam = fam[fam.repos >= 2].sort_values("repos", ascending=False)
     bins = [(2, 2), (3, 5), (6, 20), (21, 100), (101, 10 ** 9)]
-    sizes = [{"family_repos": f"{lo}-{hi}" if hi < 10 ** 9 else f">{lo - 1}", "families": int(((fam.repos >= lo) & (fam.repos <= hi)).sum()),
+    sizes = [{"family_repos": (str(lo) if lo == hi else f"{lo}-{hi}") if hi < 10 ** 9 else f">{lo - 1}", "families": int(((fam.repos >= lo) & (fam.repos <= hi)).sum()),
               "files": int(fam[(fam.repos >= lo) & (fam.repos <= hi)].repos.sum())} for lo, hi in bins]
     pd.DataFrame(sizes).to_csv(TABLES / "b14_family_sizes.csv", index=False)
     for key, s in zip(("FamTwo", "FamThreeFive", "FamSixTwenty", "FamTwentyOneHundred", "FamOverHundred"), sizes):
@@ -342,9 +345,66 @@ def mal_resolution(srv: pd.DataFrame) -> None:
     print(out.to_string(index=False))
 
 
+def coverage_adjusted(files: pd.DataFrame, srv: pd.DataFrame) -> None:
+    """Code search under-indexes small files. Estimate index coverage by size class from Frame 1 (census types: every
+    Frame-1 file is eligible) and reweight Frame-2 files by 1 / coverage(size class) of their type."""
+    unp = set(srv[srv.eco.notna() & ~srv.pin.isin(["exact", "digest"])].sha)
+    rows = []
+    for t, label, sig in (("claude_settings", "grant",
+                           lambda g: g.cs_dangerous.map(loads).map(lambda d: any(x != "mcp_tool" for x in d))),
+                          ("mcp_json", "unpinned", lambda g: g.sha.isin(unp))):
+        cs = {(d["repo"].lower(), d["path"]) for d in read_jsonl(LISTS / "code_search" / f"{t}.jsonl")}
+        f1 = files[(files.frame == 1) & (files.type == t) & files.fetched.fillna(False)].copy()
+        f1["found"] = [(r.lower(), p) in cs for r, p in zip(f1.repo, f1.path)]
+        edges = np.unique(np.quantile(f1.chars.fillna(0), [0, .25, .5, .75, 1]))
+        edges[0], edges[-1] = -1, np.inf
+        f1["cls"] = pd.cut(f1.chars.fillna(0), edges, labels=False)
+        cov = f1.groupby("cls").found.mean()
+        f2 = files[(files.frame == 2) & (files.type == t) & files.fetched.fillna(False)].copy()
+        f2["cls"] = pd.cut(f2.chars.fillna(0), edges, labels=False)
+        w = 1 / f2.cls.map(cov).clip(lower=0.05)
+        y = sig(f2).astype(float)
+        raw, adj = float(y.mean()), float((w * y).sum() / w.sum())
+        y1 = sig(f1).astype(float)
+        w1 = f1.weight.fillna(1.0)
+        fr1 = float((w1 * y1).sum() / w1.sum())
+        rows.append({"type": t, "signal": label, "frame2_raw": raw, "frame2_coverage_adjusted": adj, "frame1": fr1,
+                     "coverage_by_size_class": "; ".join(f"{c:.2f}" for c in cov)})
+        k = camel(label)
+        m(f"CovAdj{k}Raw", raw, "pct"); m(f"CovAdj{k}Adj", adj, "pct"); m(f"CovAdj{k}FrameOne", fr1, "pct")
+        m(f"CovAdj{k}SmallCov", float(cov.iloc[0]), "pct"); m(f"CovAdj{k}LargeCov", float(cov.iloc[-1]), "pct")
+        m(f"CovAdj{k}MissedMedianChars", float(f1[~f1.found].chars.median()), "num")
+        m(f"CovAdj{k}FoundMedianChars", float(f1[f1.found].chars.median()), "num")
+    out = pd.DataFrame(rows)
+    out.to_csv(TABLES / "b14_coverage_adjusted.csv", index=False)
+    print(out.round(4).to_string(index=False))
+    # mechanisms for instruction files: are missed files copies of files in other repositories? does the comment gap
+    # persist within .cursor/rules/*.mdc, the type with the lowest coverage?
+    md_types = sorted(MD)
+    nrep = files.groupby("sha").repo.nunique()
+    cs = set()
+    bins = {}
+    for t in md_types:
+        cs |= {(t, d["repo"].lower(), d["path"]) for d in read_jsonl(LISTS / "code_search" / f"{t}.jsonl")}
+        bins[t] = [tuple(map(int, d["shard"].split(".."))) for d in read_jsonl(LISTS / "code_search" / f"{t}_shards.jsonl")
+                   if d.get("status") in ("done", "split", "error") and ".." in str(d.get("shard"))]
+    sizes = pd.DataFrame(read_jsonl(LISTS / "frame1_files.jsonl"))[["type", "repo", "path", "size"]]
+    f1 = files[(files.frame == 1) & files.type.isin(MD) & files.fetched.fillna(False)].merge(
+        sizes, on=["type", "repo", "path"], how="left")
+    f1 = f1[[any(a <= s <= b for a, b in bins.get(t, [])) for t, s in zip(f1.type, f1["size"])]]
+    f1["found"] = [(t, r.lower(), p) in cs for t, r, p in zip(f1.type, f1.repo, f1.path)]
+    f1["dup"] = f1.sha.map(nrep).fillna(1) >= 2
+    m("CovMechDupFound", float(f1[f1.found].dup.mean()), "pct"); m("CovMechDupMissed", float(f1[~f1.found].dup.mean()), "pct")
+    mdc = f1[f1.type == "cursor_rules_mdc"]
+    com = mdc.n_instruction_comments.fillna(0) > 0
+    m("CovMechMdcFoundK", int(com[mdc.found].sum()), "num"); m("CovMechMdcFoundN", int(mdc.found.sum()), "num")
+    m("CovMechMdcMissedK", int(com[~mdc.found].sum()), "num"); m("CovMechMdcMissedN", int((~mdc.found).sum()), "num")
+
+
 def main() -> None:
     files = pd.read_parquet(DERIVED / "files.parquet")
     srv = pd.read_parquet(DERIVED / "mcp_servers.parquet")
+    coverage_adjusted(files, srv)
     for fn in (design, popularity):
         fn()
     hooks(files)

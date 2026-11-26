@@ -155,5 +155,18 @@ def main() -> None:
           "| hallucinated with MAL record:", pk[pk.hallucinated & pk.mal_record].groupby("eco").size().to_dict())
 
 
+def sanitize_top() -> None:
+    """The public top-packages table (b7, written by 06_stats.py) must not name packages that are dangling, removed or
+    carry an OSV MAL record: such a list would point attackers at names to claim or show which configurations pull
+    malware. Those rows are withheld from the released file."""
+    pk = pd.read_parquet(DERIVED / "mcp_package_risk.parquet")
+    flagged = {(e, n.lower()) for e, n, f in zip(pk.eco, pk.name, pk.dangling | pk.mal_record | pk.removed) if f}
+    b7 = pd.read_csv(TABLES / "b7_top_mcp_packages.csv")
+    keep = [(e, p.lower()) not in flagged for e, p in zip(b7.eco, b7.package)]
+    print(f"b7: withholding {len(b7) - sum(keep)} flagged package names")
+    b7[keep].to_csv(TABLES / "b7_top_mcp_packages.csv", index=False)
+
+
 if __name__ == "__main__":
     main()
+    sanitize_top()
