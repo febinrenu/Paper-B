@@ -297,7 +297,7 @@ def frame_checks() -> None:
             if "diff" in r:
                 pp = signed_pp                                         # percentage points, signed
                 put(k + "Diff", pp(r["diff"])); put(k + "DiffLo", pp(r.diff_lo)); put(k + "DiffHi", pp(r.diff_hi))
-                put(k + "Mde", f"{100 * r.mde_80:.1f}")
+                put(k + "Mde", f"{100 * r.mde_80:.1f}" if r.mde_80 == r.mde_80 else "n.e.")   # not estimable
                 put(k + "FoundK", num(r.found_k)); put(k + "MissedK", num(r.missed_k))
         put("CovBiasMinP", f"{cb.fisher_p.min():.2f}")
     lo = read("b12_location.csv")

@@ -174,6 +174,7 @@ def cooccur(files: pd.DataFrame, srv: pd.DataFrame) -> None:
         k = camel(name)
         m(f"Co{k}GivenA", ka / na, "pct"); m(f"Co{k}GivenNotA", kb / nb, "pct"); m(f"Co{k}NA", na, "num")
         m(f"Co{k}Ratio", f"{(ka / na) / (kb / nb):.1f}" if kb else None)
+        m(f"Co{k}Diff", ka / na - kb / nb, "pp"); m(f"Co{k}DiffLo", float(lo), "pp"); m(f"Co{k}DiffHi", float(hi), "pp")
 
     # file level, inside one settings file
     cs = f[f.type == "claude_settings"]
@@ -275,15 +276,19 @@ def sensitivity(files: pd.DataFrame, srv: pd.DataFrame) -> None:
     add("grant_incl_mcp_tool", float(dang[cs].map(bool).mean()), cs.sum())
     add("grant_main_no_demo", float(dang[cs & ~demo].map(lambda d: any(x != "mcp_tool" for x in d)).mean()), (cs & ~demo).sum())
     # pinning: strict (main: not exact/digest) vs lenient (only launches with no version at all)
-    mc = f.type.isin(MCP)
-    pk = srv[srv.eco.notna()]
-    strict = set(pk[~pk.pin.isin(["exact", "digest"])].sha)
-    lenient = set(pk[pk.pin == "unpinned"].sha)
-    has_pkg = f.sha.isin(set(pk.sha)) & mc
-    add("unpinned_files_strict", float(f[has_pkg].sha.isin(strict).mean()), has_pkg.sum())
-    add("unpinned_files_lenient", float(f[has_pkg].sha.isin(lenient).mean()), has_pkg.sum())
-    add("unpinned_entries_strict", float((~pk.pin.isin(["exact", "digest"])).mean()), len(pk))
-    add("unpinned_entries_lenient", float((pk.pin == "unpinned").mean()), len(pk))
+    # same units as the main MCP results (06_stats.py): server entries of every file that defines servers (each
+    # file counted, not each distinct content), and files with at least one package launch
+    cfg = f[(f.kind != "md")][["kind", "sha", "repo", "path"]]
+    s2 = srv.drop_duplicates().rename(columns={"kind": "launch"}).rename(columns={"blob_kind": "kind"})
+    pk = cfg.merge(s2, on=["sha", "kind"], how="inner")
+    pk = pk[pk.eco.notna()]
+    pk["strict"] = ~pk.pin.isin(["exact", "digest"])
+    pk["lenient"] = pk.pin == "unpinned"
+    per_file = pk.groupby(["repo", "path"])[["strict", "lenient"]].any()
+    add("unpinned_files_strict", float(per_file.strict.mean()), len(per_file))
+    add("unpinned_files_lenient", float(per_file.lenient.mean()), len(per_file))
+    add("unpinned_entries_strict", float(pk.strict.mean()), len(pk))
+    add("unpinned_entries_lenient", float(pk.lenient.mean()), len(pk))
     pd.DataFrame(rows).to_csv(TABLES / "b14_sensitivity.csv", index=False)
     print(pd.DataFrame(rows).round(4).to_string(index=False))
 
@@ -401,9 +406,58 @@ def coverage_adjusted(files: pd.DataFrame, srv: pd.DataFrame) -> None:
     m("CovMechMdcMissedK", int(com[~mdc.found].sum()), "num"); m("CovMechMdcMissedN", int((~mdc.found).sum()), "num")
 
 
+def repo_cluster(files: pd.DataFrame, srv: pd.DataFrame, B: int = 500) -> None:
+    """Files of one repository are not independent. For the main Frame-2 rates, compare a naive interval (files
+    independent) with a Poisson bootstrap over repositories (files weighted by 1/p); report the design effect."""
+    rng = np.random.default_rng(7)
+    f = files[(files.frame == 2) & files.fetched.fillna(False)].copy()
+    rule_cols = [c for c in f.columns if c.startswith("rule_") and not c.endswith("_negated")]
+    md = f.type.isin(MD)
+    dang = f.cs_dangerous.map(loads).map(lambda d: any(x != "mcp_tool" for x in d))
+    cfg = f[f.kind != "md"][["kind", "sha", "repo", "path"]]
+    pk = cfg.merge(srv.drop_duplicates().rename(columns={"kind": "launch"}).rename(columns={"blob_kind": "kind"}),
+                   on=["sha", "kind"], how="inner")
+    pk = pk[pk.eco.notna()]
+    unp_files = pk.assign(u=~pk.pin.isin(["exact", "digest"])).groupby(["repo", "path"]).u.any()
+    measures = {
+        "rule_md": (f[md], (f[rule_cols].fillna(0).sum(axis=1) > 0)[md]),
+        "comment_md": (f[md], (f.n_instruction_comments.fillna(0) > 0)[md]),
+        "grant_settings": (f[f.type == "claude_settings"], dang[f.type == "claude_settings"]),
+    }
+    uf = unp_files.reset_index()
+    measures["unpinned_mcp_files"] = (uf.assign(weight=1.0), uf.u)
+    rows = []
+    for name, (g, y) in measures.items():
+        w = g.weight.fillna(1.0).to_numpy() if "weight" in g else np.ones(len(g))
+        y = y.astype(float).to_numpy()
+        est = float((w * y).sum() / w.sum())
+        n = len(y)
+        n_eff = w.sum() ** 2 / (w ** 2).sum()
+        se_naive = np.sqrt(est * (1 - est) / n_eff)
+        agg = pd.DataFrame({"r": g.repo.to_numpy(), "wy": w * y, "w": w}).groupby("r").sum()
+        num, den = agg.wy.to_numpy(), agg.w.to_numpy()
+        reps = []
+        for _ in range(B // 50):
+            k = rng.poisson(1.0, size=(50, len(num)))
+            reps += list((k @ num) / (k @ den))
+        se_boot = float(np.std(reps, ddof=1))
+        deff = (se_boot / se_naive) ** 2 if se_naive > 0 else np.nan
+        lo, hi = np.percentile(reps, [2.5, 97.5])
+        rows.append({"measure": name, "files": n, "repos": len(num), "rate": est, "naive_lo": est - 1.96 * se_naive,
+                     "naive_hi": est + 1.96 * se_naive, "repo_boot_lo": lo, "repo_boot_hi": hi, "design_effect": deff})
+        k_ = camel(name)
+        m(f"Clu{k_}Rate", est, "pct"); m(f"Clu{k_}Lo", float(lo), "pct"); m(f"Clu{k_}Hi", float(hi), "pct")
+        m(f"Clu{k_}Deff", f"{deff:.1f}")
+    out = pd.DataFrame(rows)
+    out.to_csv(TABLES / "b14_repo_cluster.csv", index=False)
+    m("CluDeffMax", f"{out.design_effect.max():.1f}")
+    print(out.round(4).to_string(index=False))
+
+
 def main() -> None:
     files = pd.read_parquet(DERIVED / "files.parquet")
     srv = pd.read_parquet(DERIVED / "mcp_servers.parquet")
+    repo_cluster(files, srv)
     coverage_adjusted(files, srv)
     for fn in (design, popularity):
         fn()

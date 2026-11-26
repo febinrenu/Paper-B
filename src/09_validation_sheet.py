@@ -275,7 +275,8 @@ def score(holdout: bool = False) -> None:
         # the sample is stratified by detector: weight each detector's precision by the number of distinct files it
         # flags in the corpus, so the pooled figure estimates precision over all flagged files
         pop = detector_population()
-        per = pd.DataFrame([r for r in rows if r["detector"] in pop])
+        # one row per detector key (html_comment is both a detector and its own group: count it once)
+        per = pd.DataFrame([r for r in rows if r["detector"] in pop]).drop_duplicates("detector")
         if len(per):
             per["N"] = per.detector.map(pop)
             w = per.N / per.N.sum()

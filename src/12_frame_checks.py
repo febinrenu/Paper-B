@@ -155,7 +155,8 @@ def coverage_bias(files):
         # comparison could detect (two-sided 5%, power 80%): non-significance is not equivalence
         lo, hi = confint_proportions_2indep(ka, na, kb, nb, method="newcomb") if na and nb else (np.nan, np.nan)
         pp = (ka + kb) / (na + nb) if na + nb else np.nan
-        mde = 2.80 * np.sqrt(pp * (1 - pp) * (1 / na + 1 / nb)) if na and nb else np.nan
+        # with no events in either group the binomial variance is zero and no detectable difference can be stated
+        mde = 2.80 * np.sqrt(pp * (1 - pp) * (1 / na + 1 / nb)) if na and nb and 0 < pp < 1 else np.nan
         rows.append({"measure": name, "found_k": ka, "found_n": na, "found_rate": ka / na if na else np.nan,
                      "missed_k": kb, "missed_n": nb, "missed_rate": kb / nb if nb else np.nan,
                      "diff": (ka / na - kb / nb) if na and nb else np.nan, "diff_lo": lo, "diff_hi": hi,
