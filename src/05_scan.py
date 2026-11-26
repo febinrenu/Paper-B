@@ -93,32 +93,69 @@ def _scan(job: tuple[str, str]) -> dict:
     return out
 
 
+PARTS = DERIVED / "scan_parts"
+CHECKPOINT = 20000
+
+
+def flush(k: int, res: list, servers: list, details: list) -> None:
+    """Write one checkpoint: blob results, server rows and validation details of the same batch together, so a run
+    that is stopped part-way resumes without losing or duplicating anything."""
+    pd.DataFrame(res).to_parquet(PARTS / f"blobs_{k:04d}.parquet", index=False)
+    pd.DataFrame(servers or [{"sha": None}]).to_parquet(PARTS / f"servers_{k:04d}.parquet", index=False)
+    with open(PARTS / f"details_{k:04d}.jsonl", "w", encoding="utf-8") as f:
+        f.writelines(details)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--fresh", action="store_true", help="discard checkpoints of an earlier, unfinished run")
     a = ap.parse_args()
     rec = records()
     rec = rec[rec.sha.notna()]
     rec["kind"] = rec.type.map(kind_of)
     jobs = sorted(set(zip(rec.sha, rec.kind)))
-    print("records:", len(rec), "| unique (blob, kind):", len(jobs), flush=True)
-    res, servers = [], []
-    with Pool(a.workers) as pool, open(DERIVED / "details.jsonl", "w", encoding="utf-8") as det:
-        for i, r in enumerate(pool.imap_unordered(scan, jobs, chunksize=200), 1):
+    PARTS.mkdir(exist_ok=True)
+    if a.fresh:
+        for f in PARTS.iterdir():
+            f.unlink()
+    done = set()
+    for f in sorted(PARTS.glob("blobs_*.parquet")):
+        b = pd.read_parquet(f, columns=["sha", "kind"])
+        done |= set(zip(b.sha, b.kind))
+    k0 = len(list(PARTS.glob("blobs_*.parquet")))
+    todo = [j for j in jobs if j not in done]
+    print("records:", len(rec), "| unique (blob, kind):", len(jobs), "| already scanned:", len(done), flush=True)
+    res, servers, details, k = [], [], [], k0
+    with Pool(a.workers) as pool:
+        for i, r in enumerate(pool.imap_unordered(scan, todo, chunksize=200), 1):
             for s in r.pop("_servers", []):
                 # "kind" of a server is its launch kind (npx, uvx, docker, remote, ...); the blob's kind is kept apart
-                servers.append({"sha": r["sha"], "blob_kind": r["kind"], **{k: (json.dumps(v) if isinstance(v, list) else v)
-                                                                           for k, v in s.items()}})
+                servers.append({"sha": r["sha"], "blob_kind": r["kind"], **{k_: (json.dumps(v) if isinstance(v, list) else v)
+                                                                           for k_, v in s.items()}})
             d = r.pop("_detail", None)
             if d:
-                det.write(json.dumps({"sha": r["sha"], "kind": r["kind"], **d}, ensure_ascii=False) + "\n")
+                details.append(json.dumps({"sha": r["sha"], "kind": r["kind"], **d}, ensure_ascii=False) + "\n")
             res.append(r)
-            if i % 20000 == 0:
-                print(f"  {i}/{len(jobs)}", flush=True)
-    blobs = pd.DataFrame(res)
+            if i % CHECKPOINT == 0:
+                flush(k, res, servers, details)
+                k += 1
+                res, servers, details = [], [], []
+                print(f"  {len(done) + i}/{len(jobs)}", flush=True)
+    if res:
+        flush(k, res, servers, details)
+    # assemble the checkpoints
+    blobs = pd.concat([pd.read_parquet(f) for f in sorted(PARTS.glob("blobs_*.parquet"))], ignore_index=True)
+    blobs = blobs.drop_duplicates(["sha", "kind"])
+    assert len(blobs) == len(jobs), (len(blobs), len(jobs))
+    servers = pd.concat([pd.read_parquet(f) for f in sorted(PARTS.glob("servers_*.parquet"))], ignore_index=True)
+    servers = servers[servers.sha.notna()]
+    with open(DERIVED / "details.jsonl", "w", encoding="utf-8") as det:
+        for f in sorted(PARTS.glob("details_*.jsonl")):
+            det.write(f.read_text(encoding="utf-8"))
     files = rec.merge(blobs, on=["sha", "kind"], how="left")
     files.to_parquet(DERIVED / "files.parquet", index=False)
-    pd.DataFrame(servers).to_parquet(DERIVED / "mcp_servers.parquet", index=False)
+    servers.to_parquet(DERIVED / "mcp_servers.parquet", index=False)
     if "scan_error" in files:
         print("scan errors:", int(files.scan_error.notna().sum()))
     print(files.groupby(["frame", "type"]).agg(n=("sha", "size"), fetched=("fetched", "mean")).round(3).to_string())
