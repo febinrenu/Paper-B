@@ -1,0 +1,12 @@
+eco,scoped,class,names,files,repos_upper_bound
+npm,False,near_miss,51,111.0,86.0
+npm,False,other,221,315.0,283.0
+npm,False,placeholder,22,54.0,40.0
+npm,False,refused,14,17.0,15.0
+npm,True,near_miss,530,1826.0,1695.0
+npm,True,other,553,883.0,815.0
+npm,True,scope_has_no_packages,854,2221.0,2054.0
+pypi,False,near_miss,30,54.0,46.0
+pypi,False,other,126,179.0,137.0
+pypi,False,placeholder,9,20.0,18.0
+all,,distinct_scopes_checked,440,,
